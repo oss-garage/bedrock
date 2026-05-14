@@ -109,6 +109,13 @@ let
     pkgs.jq
     pkgs.cacert
     pkgs.podman-compose
+    # systemd-journald + journalctl + systemd-cat: structured log
+    # capture for both container output (`--log-driver=journald` makes
+    # conmon connect to the journal socket directly) and bedrock-io
+    # exec output (piped through `systemd-cat` with a tag). Run
+    # standalone — no PID 1 systemd — so we only consume the daemon
+    # itself, not the full unit-management surface.
+    pkgs.systemd
     bedrockShutdown
     bedrockMiner
     bedrockPebsRegister
@@ -131,10 +138,11 @@ let
   containersConf = pkgs.writeText "containers.conf" ''
     [containers]
     netns = "host"
+    log_driver = "journald"
 
     [engine]
     cgroup_manager = "cgroupfs"
-    events_logger = "file"
+    events_logger = "journald"
     runtime = "crun"
 
     [engine.runtimes]
@@ -148,6 +156,23 @@ let
   '';
 
   storageConf = pkgs.writeText "storage.conf" (builtins.readFile ../scripts/initrd-podman/storage.conf);
+
+  # journald config: keep storage in /run (memory-only — we don't want
+  # /var/log/journal persistence, which would grow the rootfs across a
+  # long-running VM), and disable rate limiting so the daemon never
+  # decides to drop log lines based on wall-clock thresholds — the
+  # determinism contract requires every log line we'd otherwise see to
+  # actually reach the journal.
+  journaldConf = pkgs.writeText "journald.conf" ''
+    [Journal]
+    Storage=volatile
+    RateLimitBurst=0
+    RateLimitIntervalSec=0
+    ForwardToSyslog=no
+    ForwardToKMsg=no
+    ForwardToConsole=no
+    ForwardToWall=no
+  '';
 
   initScript = pkgs.writeScript "init" ''
     #!/bin/sh
@@ -223,6 +248,23 @@ let
     # Set up loopback
     ip link set lo up
 
+    # Start systemd-journald standalone (no PID 1 systemd). conmon
+    # connects to its socket directly when `log_driver = "journald"`
+    # is set in containers.conf, so every container's stdout/stderr
+    # lands in the journal as a structured record (CONTAINER_NAME,
+    # MESSAGE, PRIORITY, …). bedrock-io's exec output is piped
+    # through `systemd-cat -t bedrock-exec` for the same treatment.
+    # The unified journal becomes the single source the formatter
+    # below tails — no per-container follower bookkeeping, no
+    # re-attach loops on stop/start.
+    mkdir -p /run/systemd/journal /run/log/journal
+    ${pkgs.systemd}/lib/systemd/systemd-journald &
+    # Wait for the socket so the first podman/conmon connect doesn't
+    # race the daemon's bind.
+    while [ ! -S /run/systemd/journal/socket ]; do
+        sleep 0.05
+    done
+
     # Load container images from tarballs
     # The docker-archive format preserves the original image name and tag,
     # so podman load automatically tags them (e.g. docker.io/bitcoin/bitcoin:latest).
@@ -235,9 +277,27 @@ let
     echo "Loaded images:"
     podman images
 
-    # Run workload
+    # Run workload detached. Container output and lifecycle events both
+    # flow into journald (log_driver = journald, events_logger =
+    # journald in containers.conf); bedrock-io's exec actions feed it
+    # via systemd-cat. journalctl -f -o json then drains the unified
+    # stream, and a small jq filter renders each record back to the
+    # `[name] | message` human format with a deterministic per-source
+    # color (sum of label bytes modulo the 31..36 palette). This
+    # replaces the previous per-container follow-loop entirely — restart
+    # resilience is now journald's problem, not ours.
     cd /workload
-    podman-compose up
+    podman-compose up -d
+
+    journalctl -f -o json --no-tail | jq -r --unbuffered '
+        ((.CONTAINER_NAME // .SYSLOG_IDENTIFIER) // "kernel") as $label |
+        (($label | explode | add // 0) % 6 + 31) as $color |
+        ((.MESSAGE // "") | rtrimstr("\n")) as $msg |
+        "[\u001b[\($color)m\($label)\u001b[0m] | \($msg)"
+    ' &
+
+    # Block until the shutdown VMCALL terminates the VM.
+    wait
 
     # Drop to shell
     exec setsid sh -c 'exec sh </dev/console >/dev/console 2>&1'
@@ -307,6 +367,16 @@ pkgs.stdenv.mkDerivation {
     # Podman configuration
     cp ${containersConf} rootfs/etc/containers/containers.conf
     cp ${storageConf} rootfs/etc/containers/storage.conf
+
+    # journald configuration (volatile storage, no rate limiting, no
+    # forwarding to ttys — journalctl is the only consumer).
+    mkdir -p rootfs/etc/systemd
+    cp ${journaldConf} rootfs/etc/systemd/journald.conf
+
+    # Fixed /etc/machine-id so the journal's per-boot identifiers are
+    # deterministic across runs. The value is arbitrary — journald
+    # uses it as an opaque key — but it must be 32 hex chars.
+    echo '00000000000000000000000000000001' > rootfs/etc/machine-id
 
     # Container image trust policy (required by podman for any image operation)
     cat > rootfs/etc/containers/policy.json << 'POLICY'

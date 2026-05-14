@@ -257,11 +257,105 @@ static int append_literal(char *dst, size_t cap, size_t *off,
 }
 
 /*
- * Build the shell command that will run inside call_usermodehelper. We
- * always redirect both stdout and stderr to `output_path` so the response
- * captures helper diagnostics on failure rather than leaving the host
- * with an empty response. `output_path` is per-worker so concurrent
- * commands don't race on a shared file.
+ * Extract a short journald tag from a guest-supplied bash command:
+ * the basename of the first whitespace-delimited token. Examples:
+ *
+ *   "bitcoin-cli getblockchaininfo"        → "bitcoin-cli"
+ *   "/opt/bedrock/drivers/dummy --arg"     → "dummy"
+ *   "podman stop bitcoind1"                → "podman"
+ *
+ * The result becomes SYSLOG_IDENTIFIER and what the journalctl-side
+ * formatter prints as `[<tag>] | <output>` — short and stable across
+ * variations in the trailing arguments. Writes a NUL-terminated tag
+ * into `out` (capacity `cap`); falls back to "exec" if the command
+ * has no parseable first token. Returns -ENAMETOOLONG if the result
+ * wouldn't fit.
+ */
+static int extract_command_name(const char *cmd, char *out, size_t cap)
+{
+	const char *start, *end, *p;
+	const char *fb = "exec";
+	size_t len;
+
+	if (cap == 0)
+		return -ENAMETOOLONG;
+
+	start = cmd;
+	while (*start == ' ' || *start == '\t')
+		start++;
+
+	end = start;
+	while (*end && *end != ' ' && *end != '\t' && *end != '\n')
+		end++;
+
+	/* basename: scan back from end to the byte after the last '/'. */
+	for (p = end; p > start; p--) {
+		if (*(p - 1) == '/') {
+			start = p;
+			break;
+		}
+	}
+
+	len = end - start;
+	if (len == 0) {
+		len = strlen(fb);
+		if (len + 1 > cap)
+			return -ENAMETOOLONG;
+		memcpy(out, fb, len);
+		out[len] = '\0';
+		return 0;
+	}
+	if (len + 1 > cap)
+		return -ENAMETOOLONG;
+	memcpy(out, start, len);
+	out[len] = '\0';
+	return 0;
+}
+
+/*
+ * Append the trailing journal-pipe suffix used by every exec action.
+ * Builds:
+ *
+ *   2>&1 | systemd-cat -t <tag>
+ *
+ * so the command's combined stdout+stderr lands in journald with
+ * SYSLOG_IDENTIFIER=<tag> and shows up in the init script's
+ * `journalctl -f` formatter as `[<tag>] | <line>`. The shell's
+ * `set -o pipefail` (prepended by `build_command`) makes the
+ * pipeline's exit status fall back to the failing command's, so the
+ * host-bound `exit_code` still reflects whether the action itself
+ * succeeded — even though no output bytes flow back through the I/O
+ * response. `tag` is the short command name from
+ * `extract_command_name`; it's shell-quoted defensively because the
+ * extractor doesn't restrict character classes.
+ */
+static int append_pipe_to_journal(char *cmd, size_t cmd_cap, size_t *off,
+				  const char *tag)
+{
+	int err;
+
+	err = append_literal(cmd, cmd_cap, off, " 2>&1 | systemd-cat -t ");
+	if (err)
+		return err;
+	return append_shell_quoted(cmd, cmd_cap, off, tag);
+}
+
+/*
+ * Build the shell command that will run inside call_usermodehelper.
+ * Two output paths:
+ *
+ *   - ACTION_GET_WORKLOAD_DETAILS captures stdout+stderr to
+ *     `output_path` so the worker can read it back into the I/O
+ *     response payload; the host needs the structured workload list
+ *     (e.g. to pick fuzz targets).
+ *   - Exec actions pipe stdout+stderr straight into `systemd-cat`,
+ *     so journald owns the output and the host-bound response carries
+ *     just an exit code (no payload bytes). `set -o pipefail` is
+ *     prepended so the pipeline's exit status falls back to the exec
+ *     command's failure instead of always being systemd-cat's zero.
+ *
+ * `output_path` is per-worker so concurrent ACTION_GET_WORKLOAD_DETAILS
+ * invocations don't race on a shared file; exec actions don't touch it.
  *
  * Emits a pr_info trace identifying the action and its parameters,
  * tagged with `worker_id`, so concurrent workers can be followed in
@@ -333,16 +427,17 @@ static int build_command(const struct io_request_header *hdr,
 		/*
 		 * `podman exec ... /bin/sh -c <cmd>` lets the caller supply
 		 * arbitrary shell expressions (pipes, redirects). The outer
-		 * `/bin/sh -c "<full>"` is the call_usermodehelper wrapper
-		 * that captures combined stdout+stderr to `output_path`.
-		 * `container` and `bash_cmd` are guest-supplied so they get
-		 * single-quote-escaped via `append_shell_quoted` — a `'` in
-		 * either field would otherwise break out of the wrapper.
-		 * `output_path` is module-generated (always
-		 * `/tmp/bedrock-io-output-<id>`) so we let it pass through
-		 * as a literal.
+		 * `/bin/sh -c "<full>"` is the call_usermodehelper wrapper.
+		 * Combined stdout+stderr is piped into systemd-cat (see
+		 * `append_pipe_to_journal`) so journald receives the output;
+		 * `set -o pipefail` keeps the pipeline's exit reflective of
+		 * the inner command. `container` and `bash_cmd` are
+		 * guest-supplied so they get single-quote-escaped via
+		 * `append_shell_quoted` — a `'` in either would otherwise
+		 * break out of the wrapper.
 		 */
-		err = append_literal(cmd, cmd_cap, &off, "podman exec ");
+		err = append_literal(cmd, cmd_cap, &off,
+				     "set -o pipefail; podman exec ");
 		if (err)
 			return err;
 		err = append_shell_quoted(cmd, cmd_cap, &off, container);
@@ -354,16 +449,21 @@ static int build_command(const struct io_request_header *hdr,
 		err = append_shell_quoted(cmd, cmd_cap, &off, bash_cmd);
 		if (err)
 			return err;
-		err = append_literal(cmd, cmd_cap, &off, " > ");
-		if (err)
-			return err;
-		err = append_literal(cmd, cmd_cap, &off, output_path);
-		if (err)
-			return err;
-		err = append_literal(cmd, cmd_cap, &off, " 2>&1");
-		if (err)
-			return err;
-		return 0;
+		{
+			char cmd_name[64];
+			char tag[128];
+
+			err = extract_command_name(bash_cmd, cmd_name,
+						   sizeof(cmd_name));
+			if (err)
+				return err;
+			/* Append " [<container>]" so the formatter shows
+			 * which container each exec ran inside
+			 * (e.g. `[bitcoin-cli [bitcoind1]] | …`), matching
+			 * the " [host]" convention used by ACTION_EXEC_HOST_BASH. */
+			snprintf(tag, sizeof(tag), "%s [%s]", cmd_name, container);
+			return append_pipe_to_journal(cmd, cmd_cap, &off, tag);
+		}
 	}
 	case ACTION_EXEC_HOST_BASH: {
 		const char *bash_cmd = (const char *)payload;
@@ -382,28 +482,35 @@ static int build_command(const struct io_request_header *hdr,
 
 		/*
 		 * Run `/bin/sh -c <cmd>` directly on the guest — no
-		 * `podman exec` wrapper. The outer `/bin/sh -c "<full>"`
-		 * is still the call_usermodehelper scaffold that
-		 * redirects combined stdout+stderr to `output_path`, so
-		 * the guest-supplied `bash_cmd` gets single-quote-escaped
-		 * before being spliced into the inner `-c` argument.
+		 * `podman exec` wrapper. Combined stdout+stderr is piped
+		 * into systemd-cat (see `append_pipe_to_journal`) so the
+		 * output lands in journald rather than being buffered for
+		 * the host. `set -o pipefail` keeps the pipeline's exit
+		 * reflective of the inner command. `bash_cmd` is
+		 * guest-supplied so it gets single-quote-escaped before
+		 * being spliced into the inner `-c` argument.
 		 */
-		err = append_literal(cmd, cmd_cap, &off, "/bin/sh -c ");
+		err = append_literal(cmd, cmd_cap, &off,
+				     "set -o pipefail; /bin/sh -c ");
 		if (err)
 			return err;
 		err = append_shell_quoted(cmd, cmd_cap, &off, bash_cmd);
 		if (err)
 			return err;
-		err = append_literal(cmd, cmd_cap, &off, " > ");
-		if (err)
-			return err;
-		err = append_literal(cmd, cmd_cap, &off, output_path);
-		if (err)
-			return err;
-		err = append_literal(cmd, cmd_cap, &off, " 2>&1");
-		if (err)
-			return err;
-		return 0;
+		{
+			char cmd_name[64];
+			char tag[80];
+
+			err = extract_command_name(bash_cmd, cmd_name,
+						   sizeof(cmd_name));
+			if (err)
+				return err;
+			/* Append " [host]" so the journal formatter can tell
+			 * host-side execs apart from in-container ones at a
+			 * glance (e.g. `[dummy [host]] | …`). */
+			snprintf(tag, sizeof(tag), "%s [host]", cmd_name);
+			return append_pipe_to_journal(cmd, cmd_cap, &off, tag);
+		}
 	}
 	default:
 		pr_warn("bedrock-io: worker %u: unknown action_id=%u\n",
@@ -522,26 +629,29 @@ static void bedrock_io_work_fn(struct work_struct *work)
 	/*
 	 * Phase 3: page-mutexed PUT_RESPONSE.
 	 *
-	 * Read this worker's output file directly into the shared page
-	 * (under the lock) and hand it to the hypervisor.
+	 * Only ACTION_GET_WORKLOAD_DETAILS sends bytes back through the
+	 * I/O response — exec actions stream their output into journald
+	 * via systemd-cat, so the response for them is exit-code only
+	 * and `data_read` stays 0.
 	 *
 	 * `read_status` preserves any negative errno from
 	 * `read_output_file`; `data_read` is clamped to 0 so the
 	 * data_len field stays a valid byte count, but the original
-	 * error code reaches the host via `resp_hdr.status`. (Previously
-	 * we clamped data_read first and then derived status from the
-	 * already-clamped value, which always recorded "ok".)
+	 * error code reaches the host via `resp_hdr.status`.
 	 */
 	mutex_lock(&page_mutex);
 	resp_data = (__u8 *)shared_page + sizeof(resp_hdr);
 	resp_data_cap = BEDROCK_IO_PAGE_SIZE - sizeof(resp_hdr);
 	memset(resp_data, 0, resp_data_cap);
-	data_read = read_output_file(output_path, resp_data, resp_data_cap);
-	if (data_read < 0) {
-		pr_warn("bedrock-io: read_output_file(%s) failed: %zd\n",
-			output_path, data_read);
-		read_status = (__s32)data_read;
-		data_read = 0;
+	if (req_hdr.action_id == ACTION_GET_WORKLOAD_DETAILS) {
+		data_read = read_output_file(output_path, resp_data,
+					     resp_data_cap);
+		if (data_read < 0) {
+			pr_warn("bedrock-io: read_output_file(%s) failed: %zd\n",
+				output_path, data_read);
+			read_status = (__s32)data_read;
+			data_read = 0;
+		}
 	}
 
 	resp_hdr.magic = IO_RESPONSE_MAGIC;
@@ -556,14 +666,14 @@ static void bedrock_io_work_fn(struct work_struct *work)
 	mutex_unlock(&page_mutex);
 
 	/* Unlink the per-worker temp file once the response has been
-	 * handed to the host. The initrd's tmpfs would garbage-collect on
-	 * unmount, but workers can churn through millions of requests in
-	 * one boot and these accumulate otherwise.
+	 * handed to the host. Only ACTION_GET_WORKLOAD_DETAILS writes to
+	 * this path; exec actions stream through systemd-cat and never
+	 * touch the filesystem here.
 	 *
 	 * vfs_unlink requires the parent inode's i_rwsem held for write
 	 * (LOOKUP semantics for non-NULL `delegated_inode`), so lock the
 	 * parent dentry's inode before calling and unlock after. */
-	if (got_request) {
+	if (got_request && req_hdr.action_id == ACTION_GET_WORKLOAD_DETAILS) {
 		struct path p;
 		int unlink_err = kern_path(output_path, 0, &p);
 
