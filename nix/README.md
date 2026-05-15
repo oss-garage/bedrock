@@ -18,9 +18,22 @@ nix run .#test-native   # Run tests directly on host (faster, no nested virt)
 | `bedrockModule` | `bedrock.ko` kernel module |
 | `guestKernel` | Linux 6.18 with determinism patches (TLB flush) + `vmlinux` |
 | `guestInitrd` | Trivial initramfs (boots, VMCALL shutdown) |
-| `podmanInitrd` | Podman initramfs (Bitcoin Core workload) |
 | `bedrock-cli` | CLI for loading and running guest VMs |
 | `bedrock-determinism` | Determinism checker (multi-run comparison) |
+
+The podman initrd is exposed as a function `mkPodmanInitrd` under
+`lib.<system>` — workloads supply a compose file and a docker-archive
+tarball (from `docker save`) and the function returns a bootable initramfs:
+
+```nix
+let
+  bedrock = inputs.bedrock;
+  myInitrd = bedrock.lib.x86_64-linux.mkPodmanInitrd {
+    composeYaml = ./compose.yaml;
+    imagesTar   = ./images.tar;   # docker save img1 [img2 ...] -o images.tar
+  };
+in ...
+```
 
 Build any with `nix build .#<name>`.
 
@@ -35,10 +48,12 @@ extra-sandbox-paths = /dev/kvm
 ```
 
 - **`nix-command flakes`**: Required for `nix build`, `nix run`, etc.
-- **`sandbox = relaxed`**: The podman initrd is a fixed-output derivation that
-  needs network access for `apt-get`. With `sandbox = true`, all network is
-  blocked. `relaxed` allows FODs to access the network while keeping other
-  builds sandboxed.
+- **`sandbox = relaxed`**: Needed if any of your workload's image builds use
+  `dockerTools.pullImage` or other fixed-output derivations that pull from a
+  network. With `sandbox = true`, all network is blocked. `relaxed` allows
+  FODs to access the network while keeping other builds sandboxed. The
+  initrd builder itself does not need network access — it only consumes the
+  `images.tar` you supply.
 - **`extra-sandbox-paths = /dev/kvm`**: Exposes KVM to the build sandbox so
   `nix run .#test` can launch the NixOS test VM with hardware acceleration.
 
@@ -77,7 +92,42 @@ runner. The runner needs the same host requirements listed above.
 
 ## Podman Initrd
 
-The podman initrd (`nix build .#podmanInitrd`) is built entirely from nixpkgs
-packages (podman, crun, netavark, etc.). The Nix store closure is copied into
-the rootfs with FHS symlinks so the init script and containers find their tools.
-No Docker, proot, or apt involved — the build is fully reproducible.
+The podman initrd is built entirely from nixpkgs packages (podman, crun,
+netavark, journald, etc.). The Nix store closure is copied into the rootfs
+with FHS symlinks so the init script and containers find their tools. The
+only bedrock-specific bits the initrd ships are `bedrock-pebs-register`
+(run at boot to enable precise EPT-friendly PEBS exits) and the
+`bedrock-io.ko` kernel module (the deterministic I/O channel).
+
+Workloads are everything else — compose file plus container images.
+Anything workload-specific (helper binaries, driver scripts, configs) gets
+baked into one of the images. Produce `images.tar` with whatever toolchain
+you like (`docker build` + `docker save` outside Nix, or
+`dockerTools.buildLayeredImage` inside Nix) and hand it to
+`mkPodmanInitrd` along with the compose file.
+
+### Workloads
+
+Workloads live in `workloads/<name>/`. The flake auto-discovers every
+subdirectory and exposes a `<name>Initrd` package once `images.tar` shows
+up in the flake source. Build (and run / boot) a workload with:
+
+```bash
+just build-workload bitcoin    # prints the /nix/store/...-initrd path
+```
+
+`build-workload` runs the workload's `build.sh`, stages the resulting
+`images.tar` (`git add -f`), invokes `nix build`, prints the output
+path, then unstages on `EXIT` so the tarball can't end up in a commit by
+accident — even if the build is interrupted. The tarball itself stays
+gitignored.
+
+For the bitcoin workload specifically, `build.sh` does `docker pull` +
+two `docker build`s (a miner image FROM `bitcoin/bitcoin:latest` with
+`bedrock-miner` baked in, and an alpine image with `bedrock-shutdown`
+baked in), then `docker save`s all three images into one archive. See
+`workloads/bitcoin/build.sh` and the per-image `Dockerfile`s.
+
+CI (`.github/workflows/nix.yml`) runs the same `build.sh` + `git add -f`
+steps before invoking the integration test — its checkout is ephemeral
+so the unstage isn't needed there.

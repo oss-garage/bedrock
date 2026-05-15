@@ -3,8 +3,12 @@
 # Run with: nix run .#test
 #
 # NOTE: Requires a KVM-capable host with nested VMX support.
+#
+# `bitcoinInitrd` is optional. When non-null, an extra step boots the podman
+# initrd to exercise the deterministic I/O channel. The flake passes it as
+# null whenever workloads/bitcoin/images.tar isn't in the flake source.
 { pkgs, bedrockKernel, bedrockModule, bedrockCli, bedrockDeterminism
-, guestKernel, guestInitrd, podmanInitrd }:
+, guestKernel, guestInitrd, bitcoinInitrd ? null }:
 
 let
   machineConfig = { config, pkgs, ... }: {
@@ -52,27 +56,28 @@ let
 
       # Boot trivial guest (VMCALL shutdown on init)
       machine.succeed(
-        "bedrock-cli -m 3072"
+        "bedrock-cli -m 5120"
         " -i ${guestInitrd}"
         " ${guestKernel}/vmlinux"
         " --stop-at-vt 10.0"
         " --timeout 300"
         " >&2"
       )
-
-      # Boot podman guest (runs workload, shuts down via VMCALL).
-      # The --io-action exercises the deterministic I/O channel:
-      # at virtual-time 100s the host queues a "list running
-      # containers" request, the guest module receives the IRQ on
-      # pin 9, runs `podman ps`, and returns the container names
-      # to the host.
-      machine.succeed(
-        "bedrock-cli -m 3072"
-        " -i ${podmanInitrd}"
-        " --io-action vt=100.0:list"
-        " ${guestKernel}/vmlinux"
-        " >&2"
-      )
+      ${pkgs.lib.optionalString (bitcoinInitrd != null) ''
+        # Boot podman guest (runs workload, shuts down via VMCALL).
+        # `--io-action vt=100.0:list` exercises the deterministic I/O
+        # channel: at virtual-time 100s the host queues a "list running
+        # containers" request, the guest module receives the IRQ on pin
+        # 9, runs `podman ps`, and returns the container names to the
+        # host.
+        machine.succeed(
+          "bedrock-cli -m 5120"
+          " -i ${bitcoinInitrd}"
+          " --io-action vt=100.0:list"
+          " ${guestKernel}/vmlinux"
+          " >&2"
+        )
+      ''}
     '';
   };
 in

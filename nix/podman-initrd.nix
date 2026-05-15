@@ -4,26 +4,27 @@
 # The Nix store closure of all runtime dependencies is copied into the rootfs,
 # with FHS symlinks so that podman, init, and containers all find their tools.
 #
-# `guestKernel` is the configured patched-6.18 guest kernel (see
-# nix/guest-kernel.nix). We need its `dev` output to build the bedrock-io
-# kernel module out-of-tree against the same configuration the guest boots.
-{ pkgs, guestKernel }:
+# Args:
+#   guestKernel  Patched 6.18 guest kernel (see nix/guest-kernel.nix). Its `dev`
+#                output is used to build the bedrock-io kernel module out-of-tree
+#                against the exact same configuration the guest boots.
+#   composeYaml  Path (or derivation) for the workload's compose file. Copied to
+#                /workload/compose.yaml and `podman-compose up -d`'d at boot.
+#   imagesTar    Path (or derivation) for a docker-archive tarball containing
+#                every image referenced from composeYaml. Produce it with
+#                `docker save img1 [img2 ...] -o images.tar` (multiple images in
+#                one archive is fine — `podman load` reads the embedded manifest
+#                to recover each one's name+tag). The compose file should use
+#                `pull_policy: never` so podman doesn't try to fetch from a
+#                registry.
+#
+# Anything workload-specific — helper binaries, driver scripts, configs — must
+# be baked into one of the images. The initrd ships only the generic podman /
+# journald / kernel-module infrastructure plus `bedrock-pebs-register`, which it
+# runs at boot to enable precise EPT-friendly PEBS exits.
+{ pkgs, guestKernel, composeYaml, imagesTar }:
 
 let
-  bedrockShutdown = pkgs.pkgsStatic.stdenv.mkDerivation {
-    name = "bedrock-shutdown";
-    dontUnpack = true;
-    buildPhase = "$CC -O2 -static -o bedrock-shutdown ${../scripts/initrd-podman/shutdown.c}";
-    installPhase = "mkdir -p $out/bin && cp bedrock-shutdown $out/bin/";
-  };
-
-  bedrockMiner = pkgs.pkgsStatic.stdenv.mkDerivation {
-    name = "bedrock-miner";
-    dontUnpack = true;
-    buildPhase = "$CC -O2 -static -o bedrock-miner ${../scripts/initrd-podman/miner.c}";
-    installPhase = "mkdir -p $out/bin && cp bedrock-miner $out/bin/";
-  };
-
   bedrockPebsRegister = pkgs.pkgsStatic.stdenv.mkDerivation {
     name = "bedrock-pebs-register";
     dontUnpack = true;
@@ -76,14 +77,6 @@ let
     '';
   };
 
-  bitcoinImage = pkgs.dockerTools.pullImage {
-    imageName = "docker.io/bitcoin/bitcoin";
-    imageDigest = "sha256:2d6c59f5a2209eaf560379eff2a566b6d61fc9bca7852d216bbd799067401091";
-    sha256 = "sha256-0+bkTPU4I4ABogVtaZ/rwV2XkGQ9+6byZaZ/rLVyK0w=";
-    finalImageName = "docker.io/bitcoin/bitcoin";
-    finalImageTag = "latest";
-  };
-
   # All runtime packages needed in the guest rootfs
   runtimePackages = [
     pkgs.podman
@@ -116,8 +109,6 @@ let
     # standalone — no PID 1 systemd — so we only consume the daemon
     # itself, not the full unit-management surface.
     pkgs.systemd
-    bedrockShutdown
-    bedrockMiner
     bedrockPebsRegister
   ];
 
@@ -131,7 +122,7 @@ let
     ignoreCollisions = true;
   };
 
-  closureInfo = pkgs.closureInfo { rootPaths = [ runtimeEnv bitcoinImage ]; };
+  closureInfo = pkgs.closureInfo { rootPaths = [ runtimeEnv ]; };
 
   # Containers.conf with absolute Nix store paths so podman finds its helpers
   # regardless of PATH or wrapper behaviour.
@@ -265,15 +256,12 @@ let
         sleep 0.05
     done
 
-    # Load container images from tarballs
-    # The docker-archive format preserves the original image name and tag,
-    # so podman load automatically tags them (e.g. docker.io/bitcoin/bitcoin:latest).
-    for img in /images/*.tar; do
-        if [ -f "$img" ]; then
-            podman load -i "$img"
-            rm -f "$img"
-        fi
-    done
+    # Load all workload images from the single docker-archive tarball.
+    # `podman load` reads the embedded manifest to recover each image's
+    # original name+tag, so a compose file referencing those names works
+    # unchanged.
+    podman load -i /images/images.tar
+    rm -f /images/images.tar
     echo "Loaded images:"
     podman images
 
@@ -340,18 +328,10 @@ pkgs.stdenv.mkDerivation {
     ln -sf ${runtimeEnv}/bin/bash rootfs/bin/sh
     ln -sf ${runtimeEnv}/bin/bash rootfs/bin/bash
 
-    # Bedrock utilities at /usr/local/bin (compose.yaml bind-mounts from here)
-    ln -sf ${bedrockShutdown}/bin/bedrock-shutdown rootfs/usr/local/bin/bedrock-shutdown
-    ln -sf ${bedrockMiner}/bin/bedrock-miner rootfs/usr/local/bin/bedrock-miner
+    # bedrock-pebs-register at /usr/local/bin/ so the init script finds it
+    # on PATH. Other bedrock helpers (shutdown, miner, etc.) are workload
+    # concerns — workloads bake them into their own container images.
     ln -sf ${bedrockPebsRegister}/bin/bedrock-pebs-register rootfs/usr/local/bin/bedrock-pebs-register
-
-    # Driver scripts mounted into containers at /opt/bedrock/drivers/ so
-    # ACTION_GET_WORKLOAD_DETAILS can enumerate them. Copied (not
-    # symlinked) so the in-container path resolves to a real regular
-    # file rather than a dangling host symlink. `chmod +x` is preserved
-    # from the source tree.
-    mkdir -p rootfs/usr/local/share/bedrock-drivers
-    cp -a ${../scripts/initrd-podman/drivers}/. rootfs/usr/local/share/bedrock-drivers/
 
     # Guest kernel module for the deterministic I/O channel. Placed at a
     # stable path so the init script can insmod it without depending on
@@ -387,11 +367,10 @@ pkgs.stdenv.mkDerivation {
     echo 'root:x:0:0:root:/root:/bin/sh' > rootfs/etc/passwd
     echo 'root:x:0:' > rootfs/etc/group
 
-    # Bitcoin container image
-    cp ${bitcoinImage} rootfs/images/bitcoin.tar
-
-    # Workload
-    cp ${../scripts/initrd-podman/compose.yaml} rootfs/workload/compose.yaml
+    # Workload: one docker-archive tarball + one compose file. `podman load`
+    # recovers image names from the manifest, so the file name here is opaque.
+    cp ${imagesTar} rootfs/images/images.tar
+    cp ${composeYaml} rootfs/workload/compose.yaml
     cp ${initScript} rootfs/init
     chmod +x rootfs/init
   '';

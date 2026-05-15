@@ -56,8 +56,32 @@
       # Trivial guest initramfs (boots and immediately shuts down via VMCALL)
       guestInitrd = import ./nix/trivial-initrd.nix { inherit pkgs; };
 
-      # Full podman initramfs (Bitcoin Core nodes + miner workload)
-      podmanInitrd = import ./nix/podman-initrd.nix { inherit pkgs guestKernel; };
+      # Builder for the podman initrd. Takes a compose.yaml and a single
+      # docker-archive tarball (from `docker save`); see nix/podman-initrd.nix
+      # for the schema. Workloads do their own image building outside Nix
+      # and feed the resulting `images.tar` in here.
+      mkPodmanInitrd = { composeYaml, imagesTar }:
+        import ./nix/podman-initrd.nix {
+          inherit pkgs guestKernel composeYaml imagesTar;
+        };
+
+      # Auto-discovered workloads. Each subdirectory of workloads/ becomes a
+      # package <name>Initrd once its images.tar shows up in the flake source.
+      # Run `just build-workload <name>` to produce + stage the tarball
+      # transiently (it's gitignored and gets unstaged after the build).
+      # Workloads without an images.tar are silently skipped so the rest of
+      # the flake still evaluates cleanly.
+      workloadInitrds = let
+        workloadsDir = ./workloads;
+      in pkgs.lib.mapAttrs' (name: _:
+        pkgs.lib.nameValuePair "${name}Initrd" (mkPodmanInitrd {
+          composeYaml = workloadsDir + "/${name}/compose.yaml";
+          imagesTar   = workloadsDir + "/${name}/images.tar";
+        })
+      ) (pkgs.lib.filterAttrs (name: type:
+        type == "directory"
+        && builtins.pathExists (workloadsDir + "/${name}/images.tar")
+      ) (builtins.readDir workloadsDir));
 
       userland = import ./nix/userland.nix { inherit pkgs; };
 
@@ -88,12 +112,19 @@
     in
     {
       packages.${system} = {
-        inherit kernel bedrockModule guestKernel guestInitrd podmanInitrd checkStack;
+        inherit kernel bedrockModule guestKernel guestInitrd checkStack;
         clippy-kernel = bedrockModuleClippy;
         check-stack = checkStack;
         bedrock-cli = userland.bedrock-cli;
         bedrock-determinism = userland.bedrock-determinism;
         default = userland.bedrock-cli;
+      } // workloadInitrds;
+
+      # `mkPodmanInitrd` is a function — keep it out of `packages` (which
+      # nix expects to be derivations) and expose it via `lib` so external
+      # flakes can build their own workloads against this one.
+      lib.${system} = {
+        inherit mkPodmanInitrd;
       };
 
       apps.${system} = {
@@ -113,10 +144,11 @@
         # Integration tests in NixOS VM: nix run .#test
         test = let
           testDriver = import ./nix/tests.nix {
-            inherit pkgs bedrockModule guestKernel guestInitrd podmanInitrd;
+            inherit pkgs bedrockModule guestKernel guestInitrd;
             bedrockKernel = kernel;
             bedrockCli = userland.bedrock-cli;
             bedrockDeterminism = userland.bedrock-determinism;
+            bitcoinInitrd = workloadInitrds.bitcoinInitrd or null;
           };
         in {
           type = "app";
@@ -147,21 +179,20 @@
 
             # Boot trivial guest
             echo "--- Booting trivial guest (VMCALL shutdown) ---"
-            bedrock-cli -m 3072 \
+            bedrock-cli -m 5120 \
               -i ${guestInitrd} \
               ${guestKernel}/vmlinux \
               --stop-at-vt 10.0 \
               --timeout 300
 
             echo "--- Trivial guest: OK ---"
-
-            # Boot podman guest
-            echo "--- Booting podman guest ---"
-            bedrock-cli -m 3072 \
-              -i ${podmanInitrd} \
-              ${guestKernel}/vmlinux
-
-            echo "--- Podman guest: OK ---"
+            ${pkgs.lib.optionalString (workloadInitrds ? bitcoinInitrd) ''
+              echo "--- Booting podman guest ---"
+              bedrock-cli -m 5120 \
+                -i ${workloadInitrds.bitcoinInitrd} \
+                ${guestKernel}/vmlinux
+              echo "--- Podman guest: OK ---"
+            ''}
             echo "=== All tests passed ==="
           '';
         in {

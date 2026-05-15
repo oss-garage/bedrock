@@ -36,9 +36,28 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - run: nix build .#clippy-kernel
 
+  bitcoin-initrd:
+    name: Build bitcoin initrd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: bedrock
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # Produce workloads/bitcoin/images.tar via docker, then stage it so the
+      # flake source (which only sees git-tracked files) picks it up. `git
+      # add -f` overrides the .gitignore entry.
+      - run: ./workloads/bitcoin/build.sh
+      - run: git add -f workloads/bitcoin/images.tar
+      - run: nix build .#bitcoinInitrd
+
   integration-test:
     name: Integration tests
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+      - run: ./workloads/bitcoin/build.sh
+      - run: git add -f workloads/bitcoin/images.tar
       - run: nix run .#test

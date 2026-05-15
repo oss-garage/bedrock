@@ -60,6 +60,22 @@ remote-clean:
 netconsole:
     rmmod netconsole 2>/dev/null; modprobe netconsole netconsole=@/eno1,@`echo $NETCONSOLE_IP`/
 
+# Build a workload's images.tar via its build.sh, then build the
+# resulting initrd derivation and print its /nix/store path. images.tar
+# is staged transiently (git add -f → nix build → git reset HEAD) so it
+# can't end up in a commit by accident even if the build is interrupted
+# after the stage step — the trap on EXIT still runs.
+#
+# Usage: just build-workload <name>     # e.g. just build-workload bitcoin
+[group: 'nix']
+build-workload name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'git reset HEAD workloads/{{name}}/images.tar 2>/dev/null || true' EXIT
+    ./workloads/{{name}}/build.sh
+    git add -f workloads/{{name}}/images.tar
+    nix build --no-link --print-out-paths .#{{name}}Initrd
+
 # Boot NixOS dev VM with nested KVM
 [group: 'nix']
 vm:

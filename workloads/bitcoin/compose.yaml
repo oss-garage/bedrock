@@ -1,12 +1,14 @@
-# Two Bitcoin Core nodes in regtest mode using host networking
+# Two Bitcoin Core regtest nodes on host networking, a miner that produces
+# one block every interval and writes hashes back to the hypervisor feedback
+# buffer, and a shutdown trigger that issues bedrock's VMCALL after a sleep.
 #
-# Node1: P2P port 18444, RPC port 18443
-# Node2: P2P port 18456, RPC port 18455, connects to Node1
-# Miner: Generates 1 block every 10 minutes to Node1
+# All four images come from images.tar (built by ./build.sh) — never pulled.
+# `image:` refs use bare names (no `docker.io/` registry prefix) so podman's
+# fallback resolution finds the `localhost/...` tags it adds at load time.
 
 services:
   bitcoind1:
-    image: docker.io/bitcoin/bitcoin:latest
+    image: bitcoin/bitcoin:latest
     pull_policy: never
     container_name: bitcoind1
     network_mode: host
@@ -28,7 +30,7 @@ services:
       - -debugexclude=leveldb
 
   bitcoind2:
-    image: docker.io/bitcoin/bitcoin:latest
+    image: bitcoin/bitcoin:latest
     pull_policy: never
     container_name: bitcoind2
     network_mode: host
@@ -53,37 +55,27 @@ services:
       - bitcoind1
 
   miner:
-    image: docker.io/bitcoin/bitcoin:latest
+    image: bedrock/bitcoin-miner:latest
     pull_policy: never
     container_name: miner
     network_mode: host
-    privileged: true  # Required for VMCALL instruction
-    volumes:
-      - /usr/local/bin/bedrock-miner:/bedrock-miner:ro
-      # Driver scripts the deterministic I/O channel enumerates via
-      # ACTION_GET_WORKLOAD_DETAILS. Anything user-executable here
-      # appears in the workload listing and becomes a fuzz target.
-      - /usr/local/share/bedrock-drivers:/opt/bedrock/drivers:ro
-    entrypoint: ["/bedrock-miner"]
+    privileged: true  # Required for VMCALL
     command: ["600"]  # Sleep interval in seconds (10 minutes)
     depends_on:
       - bitcoind1
 
-  # Shutdown service - calls bedrock VMCALL shutdown after workload completes
   shutdown:
-    image: docker.io/bitcoin/bitcoin:latest
+    image: bedrock/shutdown:latest
     pull_policy: never
     container_name: shutdown
     network_mode: host
-    privileged: true
-    volumes:
-      - /usr/local/bin/bedrock-shutdown:/bedrock-shutdown:ro
+    privileged: true  # Required for VMCALL
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        echo "Shutdown service waiting 60 minutes before shutdown..."
+        echo "Shutdown waiting 60 minutes before VMCALL..."
         sleep 3600
-        echo "Initiating VM shutdown via VMCALL hypercall..."
-        exec /bedrock-shutdown
+        echo "Initiating VM shutdown..."
+        exec /usr/local/bin/bedrock-shutdown
     depends_on:
       - miner
