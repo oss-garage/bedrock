@@ -75,36 +75,46 @@ pub fn handle_rdpmc<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
 /// Handle HLT/MWAIT VM exit.
 ///
 /// Both are idle instructions that wait for an interrupt. For deterministic
-/// execution, we advance the TSC offset so emulated_tsc reaches the APIC timer
-/// deadline, causing the timer to fire on the next VM entry.
+/// execution, we advance the TSC offset so emulated_tsc reaches the
+/// earliest pending wake-source deadline — the APIC timer, the
+/// deterministic I/O channel, or `stop_at_tsc` — causing that event to
+/// fire on the next VM entry.
 ///
-/// If `stop_at_tsc` is set and falls strictly before the timer deadline,
-/// advance only to `stop_at_tsc` instead. Otherwise the dispatch's coarse
-/// stop check fires at the deadline (overshooting the requested stop point
-/// by up to one timer period). PEBS-precise arming can't help during idle:
-/// after HLT/MWAIT there are no further retired guest instructions until the
-/// guest is woken.
+/// The clamp is gated on having at least one real wake source. With no
+/// timer *and* no pending I/O channel request, the wake source is
+/// open-ended (IPI from another vCPU, device interrupt that's about to
+/// arrive, the guest re-arming the timer, etc.) so we don't advance —
+/// `stop_at_tsc` alone is not a wake source, and jumping to it during
+/// brief Linux idle windows where the timer is momentarily disarmed
+/// (one-shot just fired, about to be re-armed via TSC_DEADLINE) would
+/// terminate the run early on every such idle even though the guest is
+/// about to do real work. With no advance, the next iteration's
+/// `inject_pending_interrupt` delivers any pending IRR (e.g. the timer
+/// that just fired) and the guest resumes.
 ///
-/// When `timer_deadline == 0` (no timer armed — typically just after a
-/// one-shot tick fired and before the guest re-arms via TSC_DEADLINE) we do
-/// NOT advance `emulated_tsc`. The Linux idle thread spends brief windows in
-/// MWAIT with the timer momentarily disarmed; jumping to `stop_at_tsc` in
-/// that window would terminate the run early on every brief idle, even
-/// though the guest is about to do real work. With no advance, the next
-/// iteration's `inject_pending_interrupt` delivers any pending IRR (e.g.
-/// the timer that just fired) and the guest resumes.
+/// PEBS-precise arming can't help during idle: after HLT/MWAIT there are
+/// no further retired guest instructions until the guest is woken, so the
+/// emulated TSC has to jump deterministically here.
 pub fn handle_idle<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
     let current_tsc = ctx.state().emulated_tsc;
     let timer_deadline = ctx.state().devices.apic.timer_deadline;
+    let io_channel_deadline = super::next_io_channel_target_tsc(ctx);
     let stop_at_tsc = ctx.state().stop_at_tsc;
 
-    // Only advance when a timer is armed. With no timer the wake source
-    // could be any pending interrupt (timer just fired, IPI, device, etc.)
-    // — let the next iteration handle injection without skipping ahead.
-    if timer_deadline > 0 {
+    // Only advance when there's a real wake source (timer or I/O channel
+    // request). `stop_at_tsc` is folded into the min target when we do
+    // advance, but isn't itself a wake source.
+    let timer = (timer_deadline > 0).then_some(timer_deadline);
+    let wake = match (timer, io_channel_deadline) {
+        (Some(t), Some(i)) => Some(t.min(i)),
+        (Some(t), None) => Some(t),
+        (None, Some(i)) => Some(i),
+        (None, None) => None,
+    };
+    if let Some(wake) = wake {
         let target = match stop_at_tsc {
-            Some(s) => timer_deadline.min(s),
-            None => timer_deadline,
+            Some(s) => wake.min(s),
+            None => wake,
         };
         if target > current_tsc {
             let delta = target - current_tsc;
@@ -117,7 +127,7 @@ pub fn handle_idle<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         return ExitHandlerResult::Error(e);
     }
 
-    // Continue execution - timer interrupt will be injected on next VM entry
+    // Continue execution - wake-source interrupt will be injected on next VM entry
     ExitHandlerResult::Continue
 }
 

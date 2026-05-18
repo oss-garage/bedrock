@@ -94,6 +94,12 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallSnapshot)
         }
+        HYPERCALL_READY => {
+            if let Err(e) = advance_rip(ctx) {
+                return ExitHandlerResult::Error(e);
+            }
+            ExitHandlerResult::ExitToUserspace(ExitReason::VmcallReady)
+        }
         HYPERCALL_REGISTER_FEEDBACK_BUFFER => {
             // Read arguments: GVA in RBX, size in RCX, buffer index in RDX
             let gva = ctx.state().gprs.rbx;

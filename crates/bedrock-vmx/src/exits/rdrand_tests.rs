@@ -28,34 +28,6 @@ fn test_rdrand_instruction_info_parsing() {
 }
 
 #[test]
-fn test_rdrand_constant_mode() {
-    let mut ctx = MockVmContext::new();
-    ctx.state_mut()
-        .devices
-        .rdrand
-        .configure(RdrandMode::Constant, 0xDEADBEEF);
-    ctx.set_exit_reason(ExitReason::Rdrand);
-    ctx.set_instruction_len(3); // RDRAND is typically 3 bytes
-    ctx.set_guest_rip(0x1000);
-    // Set instruction info: RDRAND RAX (64-bit, register 0)
-    // Bits 6:3 = 0, Bits 12:11 = 2 (64-bit)
-    // Value = (2 << 11) | (0 << 3) = 0x1000
-    ctx.set_instruction_info(0x1000);
-    // Set initial RFLAGS
-    ctx.set_guest_rflags(0x2); // Reserved bit must be set
-
-    let result = handle_rdrand(&mut ctx);
-    assert!(matches!(result, ExitHandlerResult::Continue));
-
-    // Check that RAX was set to the constant value
-    assert_eq!(ctx.state().gprs.rax, 0xDEADBEEF);
-    // Check that CF was set (bit 0 of RFLAGS)
-    assert_eq!(ctx.get_guest_rflags().unwrap() & 0x1, 1);
-    // Check RIP was advanced
-    assert_eq!(ctx.get_guest_rip(), Some(0x1003));
-}
-
-#[test]
 fn test_rdrand_seeded_rng_mode() {
     let mut ctx = MockVmContext::new();
     ctx.state_mut()
@@ -123,7 +95,11 @@ fn test_rdrand_32bit_operation() {
     ctx.state_mut()
         .devices
         .rdrand
-        .configure(RdrandMode::Constant, 0xFFFFFFFF_DEADBEEF);
+        .configure(RdrandMode::ExitToUserspace, 0);
+    ctx.state_mut()
+        .devices
+        .rdrand
+        .set_pending_value(0xFFFFFFFF_DEADBEEF);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(3);
     ctx.set_guest_rip(0x1000);
@@ -148,7 +124,11 @@ fn test_rdrand_16bit_operation() {
     ctx.state_mut()
         .devices
         .rdrand
-        .configure(RdrandMode::Constant, 0xFFFFFFFF_DEADBEEF);
+        .configure(RdrandMode::ExitToUserspace, 0);
+    ctx.state_mut()
+        .devices
+        .rdrand
+        .set_pending_value(0xFFFFFFFF_DEADBEEF);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(4); // 16-bit RDRAND may be longer with prefix
     ctx.set_guest_rip(0x1000);
@@ -173,7 +153,8 @@ fn test_rdrand_r8_register() {
     ctx.state_mut()
         .devices
         .rdrand
-        .configure(RdrandMode::Constant, 0xCAFEBABE);
+        .configure(RdrandMode::ExitToUserspace, 0);
+    ctx.state_mut().devices.rdrand.set_pending_value(0xCAFEBABE);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(4); // R8-R15 need REX prefix
     ctx.set_guest_rip(0x1000);

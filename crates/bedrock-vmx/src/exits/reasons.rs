@@ -207,6 +207,9 @@ pub enum ExitReason {
     /// captured the response bytes into VmState; userspace drains them and
     /// optionally queues the next request.
     VmcallIoResponse = 265,
+    /// VMCALL hypercall: guest signaled it is ready / booted / initialized.
+    /// Guest issued VMCALL with RAX=7.
+    VmcallReady = 266,
 }
 
 /// Error when converting from raw exit reason value.

@@ -50,7 +50,7 @@
 //! // Fork from parent - shares memory via COW
 //! let child = VmBuilder::new()
 //!     .forked_from(parent_id)
-//!     .rdrand(RdrandConfig::constant(42))
+//!     .rdrand(RdrandConfig::seeded_rng(42))
 //!     .build()?;
 //! ```
 //!
@@ -70,10 +70,6 @@
 //!     }
 //!
 //!     match exit.kind() {
-//!         ExitKind::Hlt => {
-//!             println!("VM halted");
-//!             break;
-//!         }
 //!         ExitKind::VmcallShutdown => {
 //!             println!("Clean shutdown");
 //!             break;
@@ -93,9 +89,6 @@
 //!
 //! ```ignore
 //! use bedrock_vm::RdrandConfig;
-//!
-//! // Always return the same value
-//! let config = RdrandConfig::constant(0x42);
 //!
 //! // Use a seeded PRNG for reproducible sequences
 //! let config = RdrandConfig::seeded_rng(seed);
@@ -135,7 +128,7 @@ mod rdrand;
 mod registers;
 mod vm;
 
-pub use boot::{LinuxBootConfig, LinuxBootInfo};
+pub use boot::{load_kernel, LinuxBootConfig, LinuxBootInfo};
 pub use builder::VmBuilder;
 pub use error::VmError;
 pub use logging::{
@@ -145,8 +138,8 @@ pub use logging::{
 pub use rdrand::{RdrandConfig, RdrandExitInfo, RdrandMode, RdrandValue};
 pub use registers::*;
 pub use vm::{
-    parse_line_tsc_entries, ExitKind, ExitStatEntry, ExitStats, ExitStatsReport, IoctlStats,
-    LineTscEntry, LogConfig, LogMode, SingleStepConfig, Vm, VmExit, BEDROCK_DEVICE_PATH,
-    DEFAULT_MEMORY_SIZE, DEFAULT_TSC_FREQUENCY, EXIT_REASON_CHECKPOINT, LOG_BUFFER_SIZE,
-    SERIAL_BUFFER_SIZE,
+    parse_line_tsc_entries, ExitKind, ExitStatEntry, ExitStats, ExitStatsReport,
+    FeedbackBufferInfo, IoctlStats, LineTscEntry, LogConfig, LogMode, SingleStepConfig, Vm, VmExit,
+    BEDROCK_DEVICE_PATH, DEFAULT_MEMORY_SIZE, DEFAULT_TSC_FREQUENCY, EXIT_REASON_CHECKPOINT,
+    LOG_BUFFER_SIZE, MAX_FEEDBACK_BUFFERS, SERIAL_BUFFER_SIZE,
 };

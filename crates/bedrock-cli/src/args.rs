@@ -191,8 +191,6 @@ impl Args {
 /// RDRAND emulation mode.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RdrandMode {
-    /// Always return a constant value
-    Constant,
     /// Use seeded PRNG (deterministic)
     #[default]
     Seeded,

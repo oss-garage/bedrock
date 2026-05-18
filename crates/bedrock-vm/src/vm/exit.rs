@@ -19,7 +19,6 @@ use super::Vm;
 ///     print!("{}", exit.serial_output(&vm));
 /// }
 /// match exit.kind() {
-///     ExitKind::Hlt => println!("VM halted"),
 ///     ExitKind::VmcallShutdown => println!("Clean shutdown"),
 ///     ExitKind::Continue | ExitKind::LogBufferFull => continue,
 ///     kind => println!("Unexpected exit: {:?}", kind),
@@ -27,8 +26,6 @@ use super::Vm;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
-    /// HLT instruction - VM has halted.
-    Hlt,
     /// VMCALL shutdown hypercall.
     VmcallShutdown,
     /// VMCALL snapshot hypercall.
@@ -36,6 +33,9 @@ pub enum ExitKind {
         /// Snapshot tag from guest.
         tag: u64,
     },
+    /// VMCALL ready hypercall — guest signaled it has finished its
+    /// boot/initialization and is ready for the host's workload.
+    VmcallReady,
     /// Stop-at-TSC threshold reached.
     StopTscReached,
     /// VMCALL feedback buffer registration hypercall.
@@ -102,7 +102,6 @@ impl VmExit {
             1 => "EXTERNAL_INTERRUPT",
             2 => "TRIPLE_FAULT",
             10 => "CPUID",
-            12 => "HLT",
             28 => "CR_ACCESS",
             30 => "IO_INSTRUCTION",
             31 => "MSR_READ",
@@ -125,6 +124,7 @@ impl VmExit {
             263 => "VMCALL_PEBS_PAGE",
             264 => "VMCALL_IO_REGISTER_PAGE",
             265 => "VMCALL_IO_RESPONSE",
+            266 => "VMCALL_READY",
             _ => "UNKNOWN",
         }
     }
@@ -132,7 +132,6 @@ impl VmExit {
     /// Get the categorized exit kind for pattern matching.
     pub fn kind(&self) -> ExitKind {
         match self.exit_reason {
-            12 => ExitKind::Hlt,
             258 => ExitKind::VmcallShutdown,
             260 => ExitKind::VmcallSnapshot {
                 tag: self.exit_qualification,
@@ -140,6 +139,7 @@ impl VmExit {
             259 => ExitKind::StopTscReached,
             261 => ExitKind::FeedbackBufferRegistered,
             265 => ExitKind::IoResponse,
+            266 => ExitKind::VmcallReady,
             57 => ExitKind::Rdrand,
             61 => ExitKind::Rdseed,
             257 => ExitKind::LogBufferFull,

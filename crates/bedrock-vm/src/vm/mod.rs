@@ -662,23 +662,12 @@ impl Vm {
     /// Set the value to return for the next RDRAND/RDSEED instruction.
     ///
     /// This is only used when RDRAND is configured in ExitToUserspace mode.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if this is a forked VM.
     pub fn set_rdrand_value(&self, value: u64) -> io::Result<()> {
-        if self.forked {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "forked VMs do not support set_rdrand_value",
-            ));
-        }
-
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
                 BEDROCK_VM_SET_RDRAND_VALUE as libc::c_ulong,
-                value,
+                &value as *const u64,
             )
         };
 

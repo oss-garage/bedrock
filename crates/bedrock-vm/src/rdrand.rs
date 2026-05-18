@@ -3,23 +3,20 @@
 //! RDRAND emulation configuration types.
 //!
 //! This module defines the configuration structures for RDRAND instruction
-//! emulation. Three modes are supported:
+//! emulation. Two modes are supported:
 //!
-//! 1. **Constant**: Always return a fixed value provided by userspace.
-//! 2. **Seeded RNG**: Use a simple non-cryptographic PRNG seeded by userspace.
-//! 3. **Exit to userspace**: Return to userspace on each RDRAND, allowing
+//! 1. **Seeded RNG**: Use a simple non-cryptographic PRNG seeded by userspace.
+//! 2. **Exit to userspace**: Return to userspace on each RDRAND, allowing
 //!    userspace to provide the value.
 
 /// RDRAND emulation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum RdrandMode {
-    /// Always return a constant value.
-    Constant = 0,
     /// Use a seeded PRNG (xorshift64).
-    SeededRng = 1,
+    SeededRng = 0,
     /// Exit to userspace for each RDRAND, let userspace provide value.
-    ExitToUserspace = 2,
+    ExitToUserspace = 1,
 }
 
 impl TryFrom<u32> for RdrandMode {
@@ -27,9 +24,8 @@ impl TryFrom<u32> for RdrandMode {
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(RdrandMode::Constant),
-            1 => Ok(RdrandMode::SeededRng),
-            2 => Ok(RdrandMode::ExitToUserspace),
+            0 => Ok(RdrandMode::SeededRng),
+            1 => Ok(RdrandMode::ExitToUserspace),
             _ => Err(()),
         }
     }
@@ -47,22 +43,12 @@ pub struct RdrandConfig {
     /// Reserved for alignment.
     pub _reserved: u32,
     /// Value used by the emulation mode:
-    /// - For Constant mode: the value to return
     /// - For SeededRng mode: the seed for the PRNG
     /// - For ExitToUserspace mode: ignored
     pub value: u64,
 }
 
 impl RdrandConfig {
-    /// Create a configuration that returns a constant value.
-    pub fn constant(value: u64) -> Self {
-        Self {
-            mode: RdrandMode::Constant as u32,
-            _reserved: 0,
-            value,
-        }
-    }
-
     /// Create a configuration that uses a seeded PRNG.
     pub fn seeded_rng(seed: u64) -> Self {
         Self {

@@ -73,6 +73,8 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        echo "Signaling VM ready..."
+        /usr/local/bin/bedrock-shutdown --ready
         echo "Shutdown waiting 60 minutes before VMCALL..."
         sleep 3600
         echo "Initiating VM shutdown..."

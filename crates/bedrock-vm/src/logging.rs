@@ -132,9 +132,33 @@ pub struct LogEntry {
     /// instructions.
     pub pebs_arm_delta: u64,
 
+    // --- Determinism debugging fields ---
+    // Internal kernel state captured at every exit. Useful for finding the
+    // exact point at which two runs diverge in *internal* state even when
+    // their guest-visible state is identical.
+    /// `last_instruction_count` at exit time (fresh PMC0 read, in retired
+    /// guest instructions since fork). Equal to `tsc - tsc_offset` for
+    /// deterministic exits; on non-deterministic exits `tsc` (= emulated_tsc)
+    /// is stale but this field stays fresh, so the delta tells you how many
+    /// instructions retired between the previous deterministic exit and now.
+    pub last_instruction_count: u64,
+    /// `apic.timer_deadline` at exit time. 0 if no timer pending.
+    pub apic_timer_deadline: u64,
+    /// `io_channel.request_target_tsc` at exit time. 0 if no pending
+    /// targeted I/O request.
+    pub io_channel_target_tsc: u64,
+    /// `pebs.armed_target_tsc` at exit time. 0 if PEBS not armed. Lets you
+    /// see which target PEBS arming chose this iteration (timer vs
+    /// io_channel vs stop_at).
+    pub pebs_armed_target_tsc: u64,
+    /// Packed VMX state flags:
+    /// - bit 0: `mtf_enabled` (MTF set in proc-based VM-exec controls)
+    /// - bit 1: `last_exit_deterministic` (was the *previous* exit determ?)
+    pub vmx_state_flags: u64,
+
     /// Padding to reach 512 bytes.
     #[serde(skip)]
-    pub _padding: [u64; 21],
+    pub _padding: [u64; 16],
 }
 
 impl LogEntry {
@@ -176,7 +200,6 @@ impl LogEntry {
         match self.exit_reason {
             0 => "EXCEPTION_NMI",
             10 => "CPUID",
-            12 => "HLT",
             16 => "RDTSC",
             28 => "CR_ACCESS",
             30 => "IO_INSTRUCTION",

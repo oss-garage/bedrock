@@ -3,14 +3,6 @@
 use super::*;
 
 #[test]
-fn test_constant_mode() {
-    let mut state = RdrandState::constant(0xDEADBEEF);
-    assert_eq!(state.generate(), Some(0xDEADBEEF));
-    assert_eq!(state.generate(), Some(0xDEADBEEF));
-    assert_eq!(state.generate(), Some(0xDEADBEEF));
-}
-
-#[test]
 fn test_seeded_rng_deterministic() {
     let mut state1 = RdrandState::seeded_rng(12345);
     let mut state2 = RdrandState::seeded_rng(12345);
@@ -58,10 +50,6 @@ fn test_exit_to_userspace_mode() {
 #[test]
 fn test_configure() {
     let mut state = RdrandState::default();
-
-    state.configure(RdrandMode::Constant, 42);
-    assert_eq!(state.mode, RdrandMode::Constant);
-    assert_eq!(state.generate(), Some(42));
 
     state.configure(RdrandMode::SeededRng, 100);
     assert_eq!(state.mode, RdrandMode::SeededRng);

@@ -25,6 +25,7 @@
 //! ```
 
 pub mod constants;
+mod elf;
 mod gdt;
 mod linux;
 mod mptable;
@@ -35,6 +36,7 @@ mod regs;
 pub use constants::defaults;
 pub use constants::memory::{BOOT_PARAMS_ADDR, CMDLINE_ADDR, PML4_ADDR};
 pub use constants::mptable::BASE_ADDR as MPTABLE_BASE;
+pub use elf::load_kernel;
 pub use gdt::setup_gdt;
 pub use linux::{LinuxBootConfig, LinuxBootInfo};
 pub use mptable::setup_mptable;

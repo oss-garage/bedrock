@@ -186,16 +186,24 @@ pub fn update_mtf_state<C: VmContext>(ctx: &mut C) -> Result<(), ExitError> {
     };
 
     // The PEBS margin gate fires whenever we're inside the
-    // [target - MTF_MARGIN, target) window of *any* armed precise exit
-    // (currently the APIC timer or the deterministic I/O channel) so the
-    // final approach single-steps to the exact boundary instead of
-    // skidding past it.
+    // [target - MTF_MARGIN, target) window of *any* precise-exit target:
+    // the APIC timer, the I/O channel target, or `stop_at_tsc`. Each gets
+    // the same MTF treatment so the final approach single-steps onto the
+    // exact boundary, regardless of which target PEBS itself happened to
+    // arm for this iteration (PEBS is a single counter; the others get
+    // covered by MTF stepping when their windows are entered).
     let in_margin = |target_opt: Option<u64>| match target_opt {
         Some(target) => count >= target.saturating_sub(MTF_MARGIN) && count < target,
         None => false,
     };
+    let stop_at_count = ctx
+        .state()
+        .stop_at_tsc
+        .map(|t| t.saturating_sub(ctx.state().tsc_offset));
     let in_pebs_margin = pebs_registered
-        && (in_margin(next_timer_exit_count(ctx)) || in_margin(next_io_channel_exit_count(ctx)));
+        && (in_margin(next_timer_exit_count(ctx))
+            || in_margin(next_io_channel_exit_count(ctx))
+            || in_margin(stop_at_count));
 
     let should_enable = in_single_step || in_pebs_margin;
 
@@ -287,8 +295,13 @@ pub fn handle_exit<C: VmContext, K: Kernel, A: CowAllocator<C::CowPage>>(
             let count = ctx.state().last_instruction_count;
             let tsc = count + ctx.state().tsc_offset;
             let on_target = |t: Option<u64>| matches!(t, Some(target) if count == target);
-            let on_boundary =
-                on_target(next_timer_exit_count(ctx)) || on_target(next_io_channel_exit_count(ctx));
+            let stop_at_count = ctx
+                .state()
+                .stop_at_tsc
+                .map(|t| t.saturating_sub(ctx.state().tsc_offset));
+            let on_boundary = on_target(next_timer_exit_count(ctx))
+                || on_target(next_io_channel_exit_count(ctx))
+                || on_target(stop_at_count);
             let in_single_step_range = match ctx.state().single_step_tsc_range {
                 Some((start, end)) => tsc >= start && tsc < end,
                 None => false,

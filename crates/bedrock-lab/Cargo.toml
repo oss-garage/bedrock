@@ -1,14 +1,12 @@
 [package]
-name = "bedrock-cli"
+name = "bedrock-lab"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Command-line interface for the bedrock hypervisor"
+description = "High-level testing and debugging API for the bedrock hypervisor"
 
 [dependencies]
 bedrock-vm = { path = "../bedrock-vm" }
+
+[dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-ctrlc = "3.4"
-env_logger = "0.11"
-log = "0.4"
-serde_json = "1.0"

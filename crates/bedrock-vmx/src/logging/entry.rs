@@ -133,8 +133,20 @@ pub struct LogEntry {
     /// post-mortem tooling correlate skid against arm delta.
     pub pebs_arm_delta: u64,
 
+    // --- Determinism debugging fields (mirrored from bedrock-vm). ---
+    /// `last_instruction_count` at exit time (fresh PMC0 read).
+    pub last_instruction_count: u64,
+    /// `apic.timer_deadline` at exit time. 0 if no timer pending.
+    pub apic_timer_deadline: u64,
+    /// `io_channel.request_target_tsc` at exit time.
+    pub io_channel_target_tsc: u64,
+    /// `pebs.armed_target_tsc` at exit time. 0 if PEBS not armed.
+    pub pebs_armed_target_tsc: u64,
+    /// Packed VMX state flags: bit 0 = mtf_enabled, bit 1 = last_exit_deterministic.
+    pub vmx_state_flags: u64,
+
     /// Padding to reach 512 bytes.
-    pub _padding: [u64; 21],
+    pub _padding: [u64; 16],
 }
 
 // Compile-time assertion that LogEntry is exactly LOG_ENTRY_SIZE bytes.
@@ -189,7 +201,12 @@ impl LogEntry {
             pebs_tsc_offset_delta: 0,
             pebs_iters_since_arm: 0,
             pebs_arm_delta: 0,
-            _padding: [0; 21],
+            last_instruction_count: 0,
+            apic_timer_deadline: 0,
+            io_channel_target_tsc: 0,
+            pebs_armed_target_tsc: 0,
+            vmx_state_flags: 0,
+            _padding: [0; 16],
         }
     }
 }

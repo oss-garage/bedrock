@@ -1463,7 +1463,6 @@ fn compare_exit_stats(a: &ExitStats, b: &ExitStats) -> Option<String> {
         ("rdpmc", a.rdpmc.count, b.rdpmc.count),
         ("mwait", a.mwait.count, b.mwait.count),
         ("vmcall", a.vmcall.count, b.vmcall.count),
-        ("hlt", a.hlt.count, b.hlt.count),
         ("apic_access", a.apic_access.count, b.apic_access.count),
         ("mtf", a.mtf.count, b.mtf.count),
         ("xsetbv", a.xsetbv.count, b.xsetbv.count),

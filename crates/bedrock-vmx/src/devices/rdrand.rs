@@ -3,11 +3,10 @@
 //! RDRAND emulation state.
 //!
 //! This module provides state for emulating the RDRAND (and RDSEED) instructions.
-//! Three modes are supported:
+//! Two modes are supported:
 //!
-//! 1. **Constant**: Always return a fixed value.
-//! 2. **Seeded RNG**: Use a simple xorshift64 PRNG seeded by userspace.
-//! 3. **Exit to userspace**: Return to userspace on each RDRAND.
+//! 1. **Seeded RNG**: Use a simple xorshift64 PRNG seeded by userspace.
+//! 2. **Exit to userspace**: Return to userspace on each RDRAND.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
@@ -17,8 +16,6 @@ use crate::prelude::*;
 /// RDRAND emulation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RdrandMode {
-    /// Always return a constant value.
-    Constant,
     /// Use a seeded PRNG (xorshift64).
     #[default]
     SeededRng,
@@ -32,7 +29,6 @@ pub struct RdrandState {
     /// Current emulation mode.
     pub mode: RdrandMode,
     /// Value used for emulation:
-    /// - Constant mode: the value to return
     /// - SeededRng mode: the current RNG state (mutated on each call)
     /// - ExitToUserspace mode: the value to return (set by userspace)
     pub value: u64,
@@ -53,15 +49,6 @@ impl Default for RdrandState {
 }
 
 impl RdrandState {
-    /// Create a new RdrandState with constant mode.
-    pub fn constant(value: u64) -> Self {
-        Self {
-            mode: RdrandMode::Constant,
-            value,
-            pending_value: None,
-        }
-    }
-
     /// Create a new RdrandState with seeded RNG mode.
     pub fn seeded_rng(seed: u64) -> Self {
         Self {
@@ -101,14 +88,12 @@ impl RdrandState {
 
     /// Generate a random value based on the current mode.
     ///
-    /// For Constant mode: returns the configured value.
     /// For SeededRng mode: returns and updates the xorshift64 state.
     /// For ExitToUserspace mode: returns the pending value if set, or None.
     ///
     /// Returns `Some(value)` if a value is available, `None` if we need to exit to userspace.
     pub fn generate(&mut self) -> Option<u64> {
         match self.mode {
-            RdrandMode::Constant => Some(self.value),
             RdrandMode::SeededRng => {
                 // xorshift64 algorithm
                 let mut x = self.value;

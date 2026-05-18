@@ -150,11 +150,11 @@ pub(crate) struct BedrockSerialInput {
 /// RDRAND emulation configuration passed from userspace.
 #[repr(C)]
 pub(crate) struct BedrockRdrandConfig {
-    /// Mode: 0 = Constant, 1 = SeededRng, 2 = ExitToUserspace.
+    /// Mode: 0 = SeededRng, 1 = ExitToUserspace.
     pub mode: u32,
     /// Reserved for alignment.
     pub _reserved: u32,
-    /// Value: constant value for mode 0, seed for mode 1, unused for mode 2.
+    /// Value: seed for mode 0, unused for mode 1.
     pub value: u64,
 }
 
@@ -237,8 +237,6 @@ pub(crate) struct BedrockExitStats {
     pub mwait: BedrockExitStatEntry,
     /// VMCALL hypercall exits.
     pub vmcall: BedrockExitStatEntry,
-    /// HLT instruction exits.
-    pub hlt: BedrockExitStatEntry,
     /// APIC access exits.
     pub apic_access: BedrockExitStatEntry,
     /// Monitor trap flag (MTF) exits.

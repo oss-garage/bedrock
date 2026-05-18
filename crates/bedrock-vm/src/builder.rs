@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_builder_rdrand() {
-        let builder = VmBuilder::new().rdrand(RdrandConfig::constant(42));
+        let builder = VmBuilder::new().rdrand(RdrandConfig::seeded_rng(42));
         assert!(builder.rdrand_config.is_some());
     }
 

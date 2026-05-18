@@ -7,6 +7,7 @@ description = "Userland API for interacting with bedrock VMs"
 
 [dependencies]
 bedrock-vmx = { path = "../bedrock-vmx" }
+goblin = "0.9"
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -5,8 +5,6 @@
 //! Loads vmlinux ELF images and boots them using the Linux 64-bit boot protocol.
 
 mod args;
-mod elf;
-
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::process;
@@ -15,12 +13,11 @@ use clap::Parser;
 use log::{debug, info, trace, warn};
 
 use bedrock_vm::{
-    parse_line_tsc_entries, ExitKind, ExitStatsReport, LineTscEntry, LinuxBootConfig, LogConfig,
-    LogEntry, RdrandConfig, Vm, VmBuilder, BEDROCK_DEVICE_PATH, DEFAULT_TSC_FREQUENCY,
+    load_kernel, parse_line_tsc_entries, ExitKind, ExitStatsReport, LineTscEntry, LinuxBootConfig,
+    LogConfig, LogEntry, RdrandConfig, Vm, VmBuilder, BEDROCK_DEVICE_PATH, DEFAULT_TSC_FREQUENCY,
 };
 
 use args::{Args, IoAction, RdrandMode, ScheduledIoAction};
-use elf::load_kernel;
 
 /// Line-buffered output that prefixes each line with a virtual time timestamp.
 ///
@@ -260,7 +257,6 @@ macro_rules! debug_opt {
 /// Build RDRAND config from command-line arguments.
 fn build_rdrand_config(args: &Args) -> RdrandConfig {
     match args.rdrand_mode {
-        RdrandMode::Constant => RdrandConfig::constant(args.rdrand_seed),
         RdrandMode::Seeded => RdrandConfig::seeded_rng(args.rdrand_seed),
         RdrandMode::Userspace => RdrandConfig::exit_to_userspace(),
     }
@@ -328,7 +324,6 @@ fn run() -> io::Result<()> {
         "  {:<14}{}",
         "RDRAND mode:",
         match args.rdrand_mode {
-            RdrandMode::Constant => format!("constant (value: {:#x})", args.rdrand_seed),
             RdrandMode::Seeded => format!("seeded (seed: {:#x})", args.rdrand_seed),
             RdrandMode::Userspace => "userspace (exit to userspace)".to_string(),
         }
@@ -552,10 +547,6 @@ fn run() -> io::Result<()> {
 
                 // Use the new ExitKind enum for cleaner matching
                 match exit.kind() {
-                    ExitKind::Hlt => {
-                        info!("VM halted (HLT instruction)");
-                        break;
-                    }
                     ExitKind::VmcallShutdown => {
                         info!("VM shutdown (VMCALL hypercall)");
                         break;
@@ -619,6 +610,10 @@ fn run() -> io::Result<()> {
                             },
                             Err(e) => warn!("Failed to drain I/O response: {}", e),
                         }
+                        continue;
+                    }
+                    ExitKind::VmcallReady => {
+                        info!("VM ready (VMCALL hypercall) at tsc {}", exit.emulated_tsc);
                         continue;
                     }
                     ExitKind::Continue | ExitKind::LogBufferFull => continue,

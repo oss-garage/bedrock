@@ -71,6 +71,17 @@ pub const HYPERCALL_IO_GET_REQUEST: u64 = 5;
 /// response and queue the next request.
 pub const HYPERCALL_IO_PUT_RESPONSE: u64 = 6;
 
+/// Signal that the guest has finished its boot/initialization and is ready
+/// for the host to begin its workload (fuzzing, scheduling I/O actions, etc.).
+///
+/// Inputs: none.
+/// Outputs: none — RAX is left untouched.
+///
+/// Surfaces to userspace as `ExitReason::VmcallReady` / `ExitKind::VmcallReady`
+/// and, in the lab API, as `RunOutcome::Ready`. The hypervisor does not change
+/// any internal state on this exit; it is purely a synchronization point.
+pub const HYPERCALL_READY: u64 = 7;
+
 /// Register a single 4KB page as the PEBS scratch page for precise VM exits.
 ///
 /// The page must be:

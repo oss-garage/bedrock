@@ -98,13 +98,6 @@ impl MockVmContext {
             .set_field_natural(VmcsFieldNatural::GuestRflags, rflags);
     }
 
-    /// Get guest RFLAGS.
-    pub fn get_guest_rflags(&self) -> Option<u64> {
-        self.state
-            .vmcs
-            .get_field_natural(VmcsFieldNatural::GuestRflags)
-    }
-
     /// Get mutable reference to GPRs.
     pub fn gprs_mut(&mut self) -> &mut GeneralPurposeRegisters {
         &mut self.state.gprs

@@ -27,7 +27,7 @@ use super::{
 ///     .build()?;
 ///
 /// // Load kernel into memory first (ELF parsing is caller's responsibility)
-/// let (kernel_entry, kernel_end) = load_kernel(vm.memory_mut()?, &kernel_data)?;
+/// let (kernel_entry, kernel_end) = bedrock_vm::load_kernel(vm.memory_mut()?, &kernel_data)?;
 ///
 /// // Configure and setup Linux boot
 /// let config = LinuxBootConfig::new(kernel_entry, kernel_end)
@@ -139,7 +139,7 @@ impl Vm {
     /// let mut vm = VmBuilder::new().memory_mb(64).build()?;
     ///
     /// // Load kernel first
-    /// let (entry, end) = load_kernel(vm.memory_mut()?, &kernel_elf)?;
+    /// let (entry, end) = bedrock_vm::load_kernel(vm.memory_mut()?, &kernel_elf)?;
     ///
     /// // Setup Linux boot
     /// let config = LinuxBootConfig::new(entry, end)

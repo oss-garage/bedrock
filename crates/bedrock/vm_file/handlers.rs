@@ -336,9 +336,8 @@ pub(crate) fn handle_set_rdrand_config<F: VmFileOps>(vm_file: &mut F, arg: usize
 
     // Convert mode value to RdrandMode enum
     let mode = match config.mode {
-        0 => RdrandMode::Constant,
-        1 => RdrandMode::SeededRng,
-        2 => RdrandMode::ExitToUserspace,
+        0 => RdrandMode::SeededRng,
+        1 => RdrandMode::ExitToUserspace,
         _ => {
             log_err!("SET_RDRAND_CONFIG: invalid mode {}\n", config.mode);
             return -(bindings::EINVAL as isize);
@@ -504,7 +503,6 @@ pub(crate) fn handle_get_exit_stats<F: VmFileOps>(vm_file: &F, arg: usize) -> is
         rdpmc: convert(&stats.rdpmc),
         mwait: convert(&stats.mwait),
         vmcall: convert(&stats.vmcall),
-        hlt: convert(&stats.hlt),
         apic_access: convert(&stats.apic_access),
         mtf: convert(&stats.mtf),
         xsetbv: convert(&stats.xsetbv),

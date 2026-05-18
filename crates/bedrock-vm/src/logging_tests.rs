@@ -61,7 +61,12 @@ fn test_write_jsonl() {
         pebs_tsc_offset_delta: 0,
         pebs_iters_since_arm: 0,
         pebs_arm_delta: 0,
-        _padding: [0; 21],
+        last_instruction_count: 0,
+        apic_timer_deadline: 0,
+        io_channel_target_tsc: 0,
+        pebs_armed_target_tsc: 0,
+        vmx_state_flags: 0,
+        _padding: [0; 16],
     };
 
     let mut output = Vec::new();

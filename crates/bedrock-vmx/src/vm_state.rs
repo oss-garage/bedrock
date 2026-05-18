@@ -596,8 +596,6 @@ pub struct AllExitStats {
     pub mwait: ExitStats,
     /// VMCALL hypercall exits.
     pub vmcall: ExitStats,
-    /// HLT instruction exits.
-    pub hlt: ExitStats,
     /// APIC access exits.
     pub apic_access: ExitStats,
     /// Monitor trap flag (MTF) exits.
@@ -668,7 +666,6 @@ impl AllExitStats {
             ExitReason::Rdpmc => self.rdpmc.record(cycles),
             ExitReason::Mwait => self.mwait.record(cycles),
             ExitReason::Vmcall | ExitReason::VmcallShutdown => self.vmcall.record(cycles),
-            ExitReason::Hlt => self.hlt.record(cycles),
             ExitReason::ApicAccess | ExitReason::ApicWrite => self.apic_access.record(cycles),
             ExitReason::MonitorTrapFlag => self.mtf.record(cycles),
             ExitReason::Xsetbv => self.xsetbv.record(cycles),
@@ -693,7 +690,6 @@ impl AllExitStats {
             + self.rdpmc.count
             + self.mwait.count
             + self.vmcall.count
-            + self.hlt.count
             + self.apic_access.count
             + self.mtf.count
             + self.xsetbv.count
@@ -717,7 +713,6 @@ impl AllExitStats {
             + self.rdpmc.cycles
             + self.mwait.cycles
             + self.vmcall.cycles
-            + self.hlt.cycles
             + self.apic_access.cycles
             + self.mtf.cycles
             + self.xsetbv.cycles
@@ -1691,7 +1686,17 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             pebs_tsc_offset_delta: self.last_pebs_tsc_offset_delta,
             pebs_iters_since_arm: self.last_pebs_iters_since_arm,
             pebs_arm_delta: self.last_pebs_arm_delta,
-            _padding: [0; 21],
+            last_instruction_count: self.last_instruction_count,
+            apic_timer_deadline: self.devices.apic.timer_deadline,
+            io_channel_target_tsc: self.io_channel.request_target_tsc,
+            pebs_armed_target_tsc: self
+                .pebs_state
+                .as_deref()
+                .map(|p| p.armed_target_tsc)
+                .unwrap_or(0),
+            vmx_state_flags: u64::from(self.mtf_enabled)
+                | (u64::from(self.last_exit_deterministic) << 1),
+            _padding: [0; 16],
         };
         // Consume the PEBS diagnostics: only the EPT_VIOLATION_PEBS log
         // entry that captured them should report non-zero values;

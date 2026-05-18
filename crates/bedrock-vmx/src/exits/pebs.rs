@@ -335,14 +335,14 @@ pub fn disarm_precise_exit(pebs: &mut PebsState) {
 /// timer interrupt fires at the precise retired-instruction count instead of
 /// at some later coarse exit boundary. Disarms if no timer deadline is set.
 ///
-/// We don't arm for `stop_at_tsc`. The coarse stop check in the exit
-/// dispatcher (`exits/mod.rs`) is exact for any deterministic exit, so PEBS
-/// adds nothing useful for stopping. Worse, after a one-shot APIC timer
-/// fires, `apic.timer_deadline` is reset to 0 until the guest re-arms the
-/// timer; arming PEBS for `stop_at_tsc` in that transient window encodes a
-/// huge counter_reload that takes effect on the very next entry, and any
-/// subtle bug in the encode-or-write path turns into a premature exit far
-/// before the requested stop.
+/// We also arm for `stop_at_tsc` when set. The coarse stop check in the
+/// exit dispatcher (`exits/mod.rs`) only fires on the next deterministic
+/// exit *after* `emulated_tsc >= stop_at_tsc`, so without PEBS arming the
+/// guest can run far past the requested stop before any check triggers —
+/// fine for the original "let the guest reach a natural boundary" use case,
+/// but inadequate when callers want a tight stop (e.g. to queue additional
+/// I/O actions at the same virtual time before resuming the VM). Arming
+/// here makes `stop_at_tsc` exact to within the usual PEBS margin.
 ///
 /// Called from `inject_pending_interrupt`. The `arm_precise_exit` call
 /// disarms on `AlreadyPast` / `BelowMinDelta` so the stale counter_reload
@@ -372,19 +372,28 @@ pub fn arm_for_next_iteration<C: VmContext>(ctx: &mut C) {
     // `next_io_channel_target_tsc`.
     let io_channel_deadline = super::next_io_channel_target_tsc(ctx);
 
-    // Pick the earlier of the two pending deadlines. Zero means "no APIC
+    // `stop_at_tsc` is the requested exit-to-userspace point. Arming PEBS
+    // for it makes the stop precise; the exit dispatcher's coarse check
+    // still catches any case where PEBS skids past or is disarmed.
+    let stop_deadline = ctx.state().stop_at_tsc;
+
+    // Pick the earliest of the three pending deadlines. Zero means "no APIC
     // timer arming" (Option-style absence encoded as 0 in the existing
-    // code). The chosen target plus `apic_vector` are passed into
-    // `arm_precise_exit`; the vector field of `PebsAction::InjectInterrupt`
-    // is informational (the actual injection on PEBS fire is done by the
-    // normal pre-entry path's `check_apic_timer` / `check_io_channel`),
-    // so it's fine to reuse the APIC vector for both event types.
-    let chosen_target = match (apic_deadline, io_channel_deadline) {
-        (0, None) => 0,
-        (0, Some(t)) => t,
-        (t, None) => t,
-        (a, Some(i)) => a.min(i),
-    };
+    // code); `None` means "not pending" for the other two. The chosen
+    // target plus `apic_vector` are passed into `arm_precise_exit`; the
+    // vector field of `PebsAction::InjectInterrupt` is informational (the
+    // actual injection on PEBS fire is done by the normal pre-entry path's
+    // `check_apic_timer` / `check_io_channel`), so it's fine to reuse the
+    // APIC vector for all three event types.
+    let chosen_target = [
+        Some(apic_deadline).filter(|&t| t != 0),
+        io_channel_deadline,
+        stop_deadline,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(0);
 
     let arm_result = {
         let pebs = match ctx.state_mut().pebs_state.as_deref_mut() {

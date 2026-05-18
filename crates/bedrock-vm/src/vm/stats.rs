@@ -96,8 +96,6 @@ pub struct ExitStats {
     pub mwait: ExitStatEntry,
     /// VMCALL hypercall exits.
     pub vmcall: ExitStatEntry,
-    /// HLT instruction exits.
-    pub hlt: ExitStatEntry,
     /// APIC access exits.
     pub apic_access: ExitStatEntry,
     /// Monitor trap flag (MTF) exits.
@@ -159,7 +157,6 @@ impl ExitStats {
             ("rdpmc", &self.rdpmc),
             ("mwait", &self.mwait),
             ("vmcall", &self.vmcall),
-            ("hlt", &self.hlt),
             ("apic_access", &self.apic_access),
             ("mtf", &self.mtf),
             ("xsetbv", &self.xsetbv),
