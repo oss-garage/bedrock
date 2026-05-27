@@ -101,10 +101,17 @@ fn register_miscdev_with_mode(
     }
 }
 
+/// Maximum number of VMs (root + all live forks/checkpoints) the handler
+/// tracks at once. A fork past this fails with `ENOSPC`. Sized for a fuzzer
+/// that retains many live checkpoints, each backed by its own VM; the only
+/// cost is heap memory (the `vm_list` capacity plus per-VM EPT/VMCS/COW
+/// state for VMs that actually go live), so tune to host RAM.
+const MAX_TRACKED_VMS: usize = 1024;
+
 // Define a global mutex for the handler using the kernel's global_lock! macro.
 // SAFETY: Initialized in module init before first use.
 kernel::sync::global_lock! {
-    unsafe(uninit) static HANDLER: Mutex<Option<BedrockHandler<'static, RealVmx, 64>>> = None;
+    unsafe(uninit) static HANDLER: Mutex<Option<BedrockHandler<'static, RealVmx, MAX_TRACKED_VMS>>> = None;
 }
 
 /// Private data for an open bedrock device file.
@@ -346,7 +353,7 @@ impl kernel::InPlaceModule for Bedrock {
                 HANDLER.init();
 
                 // Initialize VMX and create the handler
-                let handler = match BedrockHandler::<RealVmx, 64>::new(&MACHINE) {
+                let handler = match BedrockHandler::<RealVmx, MAX_TRACKED_VMS>::new(&MACHINE) {
                     Ok(h) => {
                         log_info!("VMX initialized successfully\n");
                         h
