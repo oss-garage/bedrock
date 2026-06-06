@@ -239,6 +239,7 @@
           pkgs.llvmPackages.clang
           pkgs.llvmPackages.llvm
           pkgs.llvmPackages.lld
+          pkgs.pahole
           pkgs.just
           pkgs.gnumake
         ];
