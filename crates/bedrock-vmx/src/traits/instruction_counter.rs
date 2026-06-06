@@ -8,6 +8,17 @@
 //! reflects guest execution. The trait abstracts the implementation so the VM
 //! run loop can be tested without hardware.
 
+/// Error while preparing or restoring an instruction counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionCounterError {
+    /// The host does not expose the PMU MSRs required by the counter.
+    Unavailable,
+    /// The counter could not program the host PMU.
+    ProgramFailed,
+    /// The counter could not restore the host PMU state.
+    RestoreFailed,
+}
+
 /// Trait for counting guest instructions retired.
 ///
 /// `prepare` is called once before the VM run loop starts (with preemption
@@ -20,13 +31,17 @@ pub trait InstructionCounter {
     /// Implementations may program PMU MSRs (e.g. `IA32_PERFEVTSEL0`) and
     /// reset the underlying counter. Must be called with preemption disabled.
     #[inline]
-    fn prepare(&mut self) {}
+    fn prepare(&mut self) -> Result<(), InstructionCounterError> {
+        Ok(())
+    }
 
     /// Restore host PMU state.
     ///
     /// Called once after the VM run loop exits, on the same CPU as `prepare`.
     #[inline]
-    fn finish(&mut self) {}
+    fn finish(&mut self) -> Result<(), InstructionCounterError> {
+        Ok(())
+    }
 
     /// Read the current guest instruction count.
     fn read(&self) -> u64;

@@ -21,10 +21,9 @@
 //! on hybrid CPUs that should be a P-core (where general-purpose counter 0
 //! supports `INST_RETIRED.ANY_P`).
 
-use core::arch::asm;
-
 use super::page::{alloc_zeroed_page, KernelPage};
-use crate::vmx::traits::InstructionCounter;
+use crate::c_helpers;
+use crate::vmx::traits::{InstructionCounter, InstructionCounterError};
 
 /// Full-width-write alias for general-purpose counter 0 (`IA32_PMC0`,
 /// MSR `0xC1`). `WRMSR` to `IA32_PMC0` itself truncates the input to 32
@@ -56,37 +55,26 @@ struct MsrListEntry {
 }
 
 #[inline]
-fn rdmsr(addr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    // SAFETY: reading an architectural MSR with no side effects.
-    unsafe {
-        asm!(
-            "rdmsr",
-            in("ecx") addr,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags),
-        );
+fn rdmsr(addr: u32) -> Result<u64, InstructionCounterError> {
+    let mut value = 0;
+    // SAFETY: `value` is a valid output pointer. The kernel helper catches
+    // the #GP raised when the MSR is unavailable.
+    let ret = unsafe { c_helpers::bedrock_rdmsr_safe(addr, &mut value) };
+    if ret != 0 {
+        return Err(InstructionCounterError::Unavailable);
     }
-    (u64::from(high) << 32) | u64::from(low)
+    Ok(value)
 }
 
 #[inline]
-fn wrmsr(addr: u32, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    // SAFETY: caller is responsible for the MSR address and value being
-    // architecturally valid; we only write PMU control MSRs here.
-    unsafe {
-        asm!(
-            "wrmsr",
-            in("ecx") addr,
-            in("eax") low,
-            in("edx") high,
-            options(nomem, nostack, preserves_flags),
-        );
+fn wrmsr(addr: u32, value: u64) -> Result<(), InstructionCounterError> {
+    // SAFETY: The kernel helper catches the #GP raised when the MSR or value
+    // is unavailable.
+    let ret = unsafe { c_helpers::bedrock_wrmsr_safe(addr, value) };
+    if ret != 0 {
+        return Err(InstructionCounterError::ProgramFailed);
     }
+    Ok(())
 }
 
 /// Direct MSR-based instruction counter for general-purpose counter 0.
@@ -160,9 +148,9 @@ impl LinuxInstructionCounter {
 }
 
 impl InstructionCounter for LinuxInstructionCounter {
-    fn prepare(&mut self) {
+    fn prepare(&mut self) -> Result<(), InstructionCounterError> {
         if self.msr_entry_page.is_none() {
-            return;
+            return Ok(());
         }
 
         // Compute PERF_GLOBAL_CTRL values for VMCS auto-load. These act as a
@@ -170,26 +158,30 @@ impl InstructionCounter for LinuxInstructionCounter {
         // outside of guest execution. NMI handlers can still flip this bit,
         // but the VMCS auto-save/load of IA32_PMC0 makes any host-side ticks
         // irrelevant — they're overwritten on the next VM entry.
-        let current_global = rdmsr(IA32_PERF_GLOBAL_CTRL);
+        let current_global = rdmsr(IA32_PERF_GLOBAL_CTRL)?;
         self.host_perf_global_ctrl = current_global & !PERF_GLOBAL_CTRL_PMC0;
         self.guest_perf_global_ctrl = self.host_perf_global_ctrl | PERF_GLOBAL_CTRL_PMC0;
 
         // Save the host's IA32_PERFEVTSEL0 and program ours.
-        let saved = rdmsr(IA32_PERFEVTSEL0);
+        let saved = rdmsr(IA32_PERFEVTSEL0)?;
         self.saved_perfevtsel0 = saved;
-        wrmsr(IA32_PERFEVTSEL0, PERFEVTSEL0_INST_RETIRED_ANY_P);
+        wrmsr(IA32_PERFEVTSEL0, PERFEVTSEL0_INST_RETIRED_ANY_P)?;
 
         self.armed = true;
+        Ok(())
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Result<(), InstructionCounterError> {
         if !self.armed {
-            return;
+            return Ok(());
         }
         // Restore the host's IA32_PERFEVTSEL0. PERF_GLOBAL_CTRL was already
         // loaded by hardware on the most recent VM exit.
-        wrmsr(IA32_PERFEVTSEL0, self.saved_perfevtsel0);
+        if wrmsr(IA32_PERFEVTSEL0, self.saved_perfevtsel0).is_err() {
+            return Err(InstructionCounterError::RestoreFailed);
+        }
         self.armed = false;
+        Ok(())
     }
 
     fn read(&self) -> u64 {

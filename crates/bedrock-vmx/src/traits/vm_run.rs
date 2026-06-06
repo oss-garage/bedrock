@@ -245,7 +245,10 @@ where
     // Program host PMU state (e.g. IA32_FIXED_CTR_CTRL) and reset the
     // counter. Must run with preemption disabled and on the CPU the loop
     // will execute on — both guaranteed by our caller.
-    ctx.state_mut().instruction_counter.prepare();
+    ctx.state_mut()
+        .instruction_counter
+        .prepare()
+        .map_err(VmRunError::InstructionCounter)?;
 
     // Configure VMCS auto-save/load of the instruction counter MSR. The CPU
     // stores the counter into the entry on VM exit and reloads it on VM
@@ -471,7 +474,11 @@ where
 
     // Restore host PMU state. Must happen before we leave the
     // preemption-disabled region so we are still on the same CPU as `prepare`.
-    ctx.state_mut().instruction_counter.finish();
+    let finish_result = ctx
+        .state_mut()
+        .instruction_counter
+        .finish()
+        .map_err(VmRunError::InstructionCounter);
 
     // Save exit info for userspace (VMCS is still loaded).
     // Deferred to here to avoid 2 VMREAD per iteration — only needed on the
@@ -487,5 +494,6 @@ where
         .read64(VmcsField64::GuestPhysicalAddr)
         .unwrap_or(0);
 
+    finish_result?;
     loop_result
 }

@@ -9,8 +9,8 @@ fn test_null_instruction_counter() {
     assert!(!counter.is_configured());
 
     // Default prepare/finish should be no-ops.
-    counter.prepare();
-    counter.finish();
+    assert_eq!(counter.prepare(), Ok(()));
+    assert_eq!(counter.finish(), Ok(()));
 
     assert_eq!(counter.read(), 0);
     assert!(counter.perf_global_ctrl_values().is_none());
@@ -41,12 +41,14 @@ impl MockInstructionCounter {
 }
 
 impl InstructionCounter for MockInstructionCounter {
-    fn prepare(&mut self) {
+    fn prepare(&mut self) -> Result<(), InstructionCounterError> {
         self.prepare_count += 1;
+        Ok(())
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Result<(), InstructionCounterError> {
         self.finish_count += 1;
+        Ok(())
     }
 
     fn read(&self) -> u64 {
@@ -69,9 +71,9 @@ fn test_mock_instruction_counter() {
     assert!(counter.is_configured());
     assert_eq!(counter.read(), 1000);
 
-    counter.prepare();
+    assert_eq!(counter.prepare(), Ok(()));
     assert_eq!(counter.prepare_count, 1);
-    counter.finish();
+    assert_eq!(counter.finish(), Ok(()));
     assert_eq!(counter.finish_count, 1);
 
     counter.count = 5000;

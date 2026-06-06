@@ -3,6 +3,8 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+use super::instruction_counter::InstructionCounterError;
+
 /// Error returned during VMX initialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmxInitError {
@@ -196,6 +198,8 @@ pub enum VmGetRegistersError {
 /// Error from VM run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmRunError {
+    /// Failed to prepare or restore the guest instruction counter.
+    InstructionCounter(InstructionCounterError),
     /// VM entry failed (VMLAUNCH/VMRESUME error).
     VmEntry(VmEntryError),
     /// Exit handler encountered a fatal error.
