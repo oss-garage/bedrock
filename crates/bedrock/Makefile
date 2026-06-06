@@ -14,7 +14,9 @@ obj-m := bedrock.o
 bedrock-y := helpers.o vmx_support.o
 
 all:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) LLVM=$(LLVM) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) LLVM=$(LLVM) \
+		KCFLAGS=-Wno-error=unused-command-line-argument \
+		KAFLAGS=-Wno-error=unused-command-line-argument modules
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean

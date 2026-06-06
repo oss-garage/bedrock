@@ -249,6 +249,10 @@
         # Help clang find the right includes
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
+        # The Nix clang wrapper adds flags that make the kernel's
+        # -nostdlibinc argument appear unused for some module sources.
+        NIX_CFLAGS_COMPILE = "-Wno-unused-command-line-argument";
+
         shellHook = ''
           echo "bedrock dev shell"
           echo "  KDIR=$KDIR"
