@@ -34,11 +34,21 @@ testing.
 
 ## Requirements
 
-- [Linux 6.18](https://github.com/torvalds/linux/tree/v6.18) host kernel with
-  `CONFIG_RUST=y`
-- Intel(R) Xeon(R) Gold 5412U (It should work on other modern Intel CPUs with
-  VT-x support, but fine-tuning may be required)
+- [Linux 6.18] host kernel with `CONFIG_RUST=y`
 - Patched linux 6.18 guest kernel (see [guest-patches/](guest-patches/))
+- Bedrock requires a modern Intel CPU, due to a required feature called
+  `EPT-friendly PEBS`, which was introduced in the Ice Lake-SP
+  microarchitecture. Therefore, Ice Lake-SP CPUs (or newer) should work.
+  
+  The following CPUs have been confirmed to work:
+  - `Intel(R) Xeon(R) Gold 5412U` (rented on [Hetzner])
+  - `Intel(R) Xeon(R) Silver 4310` (rented on [Worldstream])
+  - `{r,m}7i.metal-24xl` instances on [AWS].
+
+[Linux 6.18]: https://github.com/torvalds/linux/tree/v6.18
+[Hetzner]: https://www.hetzner.com/dedicated-rootserver/
+[Worldstream]: https://www.worldstream.com/en/dedicated-servers/
+[AWS]: https://aws.amazon.com/de/ec2/instance-types/
 
 ---
 
