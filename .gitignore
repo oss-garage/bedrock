@@ -26,3 +26,7 @@ crates/bedrock/*.cmd
 crates/bedrock/.*.cmd
 crates/bedrock/Module.symvers
 crates/bedrock/modules.order
+
+# Host-specific PEBS margin, generated at build time (see scripts/gen_pebs_margin.rs)
+crates/bedrock-vmx/src/exits/pebs_margin_generated.rs
+crates/bedrock/gen_pebs_margin
