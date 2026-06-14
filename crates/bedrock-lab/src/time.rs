@@ -204,17 +204,21 @@ impl std::ops::Sub<VirtTime> for VirtTime {
 #[macro_export]
 macro_rules! define_virt_time_macros {
     ($d:tt, $freq:expr) => {
+        #[allow(unused_macros)]
         macro_rules! vt {
                     ($d n:literal s)  => { $crate::VirtTime::from_secs_f64($d n as f64, $freq) };
                     ($d n:literal ms) => { $crate::VirtTime::from_millis_f64($d n as f64, $freq) };
                 }
+        #[allow(unused_macros)]
         macro_rules! tsc {
                     ($d n:expr) => { $crate::VirtTime::from_instructions($d n, $freq) };
                 }
+        #[allow(unused_macros)]
         macro_rules! vt_dur {
                     ($d n:literal s)  => { $crate::VirtDuration::from_secs_f64($d n as f64, $freq) };
                     ($d n:literal ms) => { $crate::VirtDuration::from_millis_f64($d n as f64, $freq) };
                 }
+        #[allow(unused_macros)]
         macro_rules! tsc_dur {
                     ($d n:expr) => { $crate::VirtDuration::from_instructions($d n, $freq) };
                 }
