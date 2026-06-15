@@ -50,6 +50,10 @@ testing.
 [Worldstream]: https://www.worldstream.com/en/dedicated-servers/
 [AWS]: https://aws.amazon.com/de/ec2/instance-types/
 
+## CI
+
+CI uses [RunsOn](https://runs-on.com/) with `m7i` AWS instances.
+
 ---
 
 *This project was created with heavy assistance from LLMs. Might freeze/hang or
