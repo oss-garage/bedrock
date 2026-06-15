@@ -183,7 +183,7 @@
               -i ${guestInitrd} \
               ${guestKernel}/vmlinux \
               --stop-at-vt 10.0 \
-              --timeout 300
+              --wall-clock-timeout 300
 
             echo "--- Trivial guest: OK ---"
             ${pkgs.lib.optionalString (workloadInitrds ? bitcoinInitrd) ''

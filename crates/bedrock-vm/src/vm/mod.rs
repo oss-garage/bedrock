@@ -5,7 +5,6 @@
 mod config;
 mod exit;
 mod ioctl;
-mod serial;
 mod stats;
 
 pub use config::{EventConfig, ExitTrigger, SingleStepConfig, EXIT_REASON_CHECKPOINT};
@@ -14,7 +13,6 @@ pub use ioctl::{
     FeedbackBufferInfo, FeedbackBufferInfoRequest, IoActionPayload, IO_CHANNEL_BUF_SIZE,
     MAX_FEEDBACK_BUFFERS,
 };
-pub use serial::{SerialInput, SERIAL_INPUT_MAX_SIZE};
 pub use stats::{ExitStatEntry, ExitStats, ExitStatsReport, IoctlStats};
 
 use std::cell::Cell;
@@ -410,47 +408,6 @@ impl Vm {
 
         let n = (payload.len as usize).min(IO_CHANNEL_BUF_SIZE);
         Ok(payload.data[..n].to_vec())
-    }
-
-    pub fn set_input(&self, input: &[u8]) -> io::Result<()> {
-        if self.forked {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "forked VMs do not support serial input",
-            ));
-        }
-
-        if input.len() > SERIAL_INPUT_MAX_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "input too large: {} > {}",
-                    input.len(),
-                    SERIAL_INPUT_MAX_SIZE
-                ),
-            ));
-        }
-
-        let mut serial_input = SerialInput {
-            len: input.len() as u32,
-            _reserved: 0,
-            buf: [0u8; SERIAL_INPUT_MAX_SIZE],
-        };
-        serial_input.buf[..input.len()].copy_from_slice(input);
-
-        let ret = unsafe {
-            libc::ioctl(
-                self.fd.as_raw_fd(),
-                BEDROCK_VM_SET_INPUT as libc::c_ulong,
-                &serial_input as *const SerialInput,
-            )
-        };
-
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(())
     }
 
     // --- Registers ---

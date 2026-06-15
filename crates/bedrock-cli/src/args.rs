@@ -7,10 +7,10 @@ use clap::{Parser, ValueEnum};
 use bedrock_vm::boot::defaults;
 use bedrock_vm::{ExitTrigger, DEFAULT_TSC_FREQUENCY};
 
-/// Bedrock CLI - Linux Kernel Loader for the bedrock hypervisor.
+/// Boot and run deterministic Linux guests on the bedrock hypervisor.
 #[derive(Parser, Debug)]
 #[command(name = "bedrock-cli")]
-#[command(about = "Linux Kernel Loader for the bedrock hypervisor")]
+#[command(about = "Boot and run deterministic Linux guests on the bedrock hypervisor")]
 #[command(version)]
 pub struct Args {
     /// Path to vmlinux ELF image (required for root VMs, unused for forked VMs)
@@ -29,12 +29,8 @@ pub struct Args {
     pub initramfs: Option<String>,
 
     /// Write serial output to file (in addition to stdout)
-    #[arg(short = 'l', long)]
-    pub log: Option<String>,
-
-    /// Serial input to send to guest (use \n for newlines)
-    #[arg(short = 'x', long, value_parser = parse_serial_input)]
-    pub input: Option<String>,
+    #[arg(short = 'l', long = "serial-log-file")]
+    pub serial_log_file: Option<String>,
 
     /// RDRAND emulation mode
     #[arg(short = 'r', long = "rdrand-mode", value_enum, default_value_t = RdrandMode::Seeded)]
@@ -70,8 +66,8 @@ pub struct Args {
     pub exit_capture: Option<ExitCaptureArg>,
 
     /// Capture `Exit` records only after emulated TSC reaches this threshold
-    #[arg(long = "exit-after-tsc", value_parser = parse_u64)]
-    pub exit_after_tsc: Option<u64>,
+    #[arg(long = "capture-exits-after-tsc", value_parser = parse_u64)]
+    pub capture_exits_after_tsc: Option<u64>,
 
     /// Stop VM when emulated TSC reaches this value
     #[arg(long = "stop-at-tsc", value_parser = parse_u64, conflicts_with = "stop_at_vt")]
@@ -97,21 +93,17 @@ pub struct Args {
     #[arg(long = "wait")]
     pub wait: bool,
 
-    /// Dump feedback buffer to file on stop-at-tsc
-    #[arg(long = "dump-feedback")]
-    pub dump_feedback: Option<String>,
-
     /// Wall-clock timeout in seconds (VM run ends after this duration)
-    #[arg(long = "timeout", value_parser = parse_f64)]
-    pub timeout: Option<f64>,
+    #[arg(long = "wall-clock-timeout", value_parser = parse_f64)]
+    pub wall_clock_timeout: Option<f64>,
 
     /// Write exit statistics to a JSON file
     #[arg(long = "exit-stats-json")]
     pub exit_stats_json: Option<String>,
 
     /// Emulated TSC frequency in Hz (defaults to the kernel's built-in default)
-    #[arg(long = "tsc-frequency", value_parser = parse_u64)]
-    pub tsc_frequency: Option<u64>,
+    #[arg(long = "virt-tsc-frequency", value_parser = parse_u64)]
+    pub virt_tsc_frequency: Option<u64>,
 
     /// Queue a deterministic I/O channel action for the guest's bedrock-io
     /// module. Repeatable; actions fire in `target_tsc` order at the first
@@ -274,14 +266,6 @@ fn parse_f64(s: &str) -> Result<f64, String> {
         .map_err(|_| format!("Invalid number: {}", s))
 }
 
-/// Parse serial input, processing escape sequences.
-fn parse_serial_input(s: &str) -> Result<String, String> {
-    Ok(s.replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
-        .replace("\\\\", "\\"))
-}
-
 /// Parse a `--io-action` spec into a `ScheduledIoAction`.
 ///
 /// Accepts an optional `tsc=<N>:` or `vt=<seconds>:` scheduling prefix
@@ -311,8 +295,8 @@ fn parse_scheduled_io_action(s: &str) -> Result<ScheduledIoAction, String> {
             return Err(format!("Negative virtual time in '{}'", s));
         }
         // Conversion uses DEFAULT_TSC_FREQUENCY because the parser runs
-        // before `--tsc-frequency` is applied to the VM. Users who pass
-        // `--tsc-frequency` and want precise alignment should specify
+        // before `--virt-tsc-frequency` is applied to the VM. Users who pass
+        // `--virt-tsc-frequency` and want precise alignment should specify
         // `tsc=...` directly.
         let tsc = (secs * DEFAULT_TSC_FREQUENCY as f64) as u64;
         (tsc, body)

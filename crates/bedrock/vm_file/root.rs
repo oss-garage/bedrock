@@ -6,15 +6,14 @@
 //! ioctl handlers for bedrock-vm anonymous inodes.
 
 use core::ffi::c_int;
-use core::mem::{size_of, MaybeUninit};
 use core::sync::atomic::AtomicBool;
 
 use kernel::bindings;
 use kernel::sync::Arc;
 
 use super::super::c_helpers::{
-    bedrock_copy_from_user, bedrock_remap_pages, bedrock_remap_vmalloc_range,
-    bedrock_vma_end, bedrock_vma_pgoff, bedrock_vma_start,
+    bedrock_remap_pages, bedrock_remap_vmalloc_range, bedrock_vma_end, bedrock_vma_pgoff,
+    bedrock_vma_start,
 };
 use super::super::page::{EventBuffer, PagePool, EVENT_BUFFER_SIZE};
 use super::super::vmx::traits::GuestMemory;
@@ -406,7 +405,6 @@ unsafe extern "C" fn bedrock_vm_ioctl(
         BEDROCK_VM_GET_REGS => handlers::handle_get_regs(vm_file, arg),
         BEDROCK_VM_SET_REGS => handlers::handle_set_regs(vm_file, arg),
         BEDROCK_VM_RUN => handlers::handle_run(vm_file, arg),
-        BEDROCK_VM_SET_INPUT => handle_set_input(vm_file, arg),
         BEDROCK_VM_SET_RDRAND_CONFIG => handlers::handle_set_rdrand_config(vm_file, arg),
         BEDROCK_VM_SET_RDRAND_VALUE => handlers::handle_set_rdrand_value(vm_file, arg),
         BEDROCK_VM_SET_EVENT_CONFIG => handlers::handle_set_event_config(vm_file, arg),
@@ -421,44 +419,4 @@ unsafe extern "C" fn bedrock_vm_ioctl(
         BEDROCK_VM_DRAIN_IO_RESPONSE => handlers::handle_drain_io_response(vm_file, arg),
         _ => -(bindings::ENOTTY as isize),
     }
-}
-
-// ============================================================================
-// Root-VM-specific handlers (not shared with forked VMs)
-// ============================================================================
-
-/// Handle SET_INPUT ioctl - set serial input buffer from userspace.
-fn handle_set_input(vm_file: &mut BedrockVmFile, arg: usize) -> isize {
-    let mut input = MaybeUninit::<BedrockSerialInput>::uninit();
-
-    // SAFETY: `input.as_mut_ptr()` points to valid, aligned, writable memory for a
-    // BedrockSerialInput. `arg` is a user-provided pointer from the ioctl syscall.
-    // bedrock_copy_from_user performs a bounded copy.
-    let not_copied = unsafe {
-        bedrock_copy_from_user(
-            input.as_mut_ptr().cast::<core::ffi::c_void>(),
-            arg as *const core::ffi::c_void,
-            size_of::<BedrockSerialInput>() as core::ffi::c_ulong,
-        )
-    };
-
-    if not_copied != 0 {
-        return -(bindings::EFAULT as isize);
-    }
-
-    // SAFETY: bedrock_copy_from_user succeeded (returned 0), so all bytes of `input`
-    // have been written and it is now fully initialized.
-    let input = unsafe { input.assume_init() };
-
-    // Validate length
-    let len = input.len as usize;
-    if len > SERIAL_INPUT_MAX_SIZE {
-        return -(bindings::EINVAL as isize);
-    }
-
-    // Set the input buffer on the serial state
-    vm_file.vm.state.devices.serial.set_input(&input.buf[..len]);
-
-    log_info!("SET_INPUT: set {} bytes of serial input\n", len);
-    0
 }

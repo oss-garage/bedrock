@@ -122,37 +122,6 @@ fn read_io_output(vm: &mut Vm, len: usize) -> io::Result<Vec<u8>> {
         .unwrap_or_default())
 }
 
-/// Dump the feedback buffer to a file.
-fn dump_feedback_buffer(vm: &mut Vm, path: &str) -> io::Result<()> {
-    // Check if feedback buffer is registered
-    let info = match vm.get_feedback_buffer_info()? {
-        Some(info) => info,
-        None => {
-            warn!("No feedback buffer registered, skipping dump");
-            return Ok(());
-        }
-    };
-
-    // Map the feedback buffer if not already mapped
-    let buffer = match vm.feedback_buffer() {
-        Some(buf) => buf,
-        None => vm.map_feedback_buffer()?,
-    };
-
-    // Write to file
-    let mut file = File::create(path)?;
-    file.write_all(buffer)?;
-
-    info!(
-        "Dumped feedback buffer to {} ({} bytes, {} pages)",
-        path,
-        buffer.len(),
-        info.num_pages
-    );
-
-    Ok(())
-}
-
 /// Wait for Ctrl-C if wait flag is set.
 fn maybe_wait_for_ctrl_c(wait: bool) {
     if wait {
@@ -219,7 +188,7 @@ fn build_event_config(args: &Args) -> EventConfig {
 
     let mut config = EventConfig::enabled(categories)
         .with_exit_trigger(trigger, target_tsc)
-        .with_exit_start_tsc(args.exit_after_tsc.unwrap_or(0));
+        .with_exit_start_tsc(args.capture_exits_after_tsc.unwrap_or(0));
     if args.no_memory_hash {
         config = config.with_no_memory_hash();
     }
@@ -280,11 +249,7 @@ fn run() -> io::Result<()> {
     debug!("  {:<14}{} MB", "Memory:", args.memory);
     debug!("  {:<14}\"{}\"", "Command line:", args.cmdline);
     debug_opt!("Initramfs:", args.initramfs);
-    debug_opt!("Log file:", args.log);
-    debug_opt!(
-        "Serial input:",
-        args.input.as_ref().map(|i| format!("{} bytes", i.len()))
-    );
+    debug_opt!("Log file:", args.serial_log_file);
     debug!(
         "  {:<14}{}",
         "RDRAND mode:",
@@ -305,7 +270,11 @@ fn run() -> io::Result<()> {
     debug_opt!("Stop at TSC:", args.stop_at_tsc);
 
     // Open log file if specified and create line-buffered output
-    let log_file: Option<File> = args.log.as_ref().map(File::create).transpose()?;
+    let log_file: Option<File> = args
+        .serial_log_file
+        .as_ref()
+        .map(File::create)
+        .transpose()?;
     let mut output = LineBufferedOutput::new(log_file);
 
     // Build configs from args
@@ -314,7 +283,7 @@ fn run() -> io::Result<()> {
     // Build VM configuration
     let mut builder = VmBuilder::new().rdrand(rdrand_config);
 
-    let tsc_frequency = args.tsc_frequency.unwrap_or(DEFAULT_TSC_FREQUENCY);
+    let tsc_frequency = args.virt_tsc_frequency.unwrap_or(DEFAULT_TSC_FREQUENCY);
 
     if let Some(parent_id) = args.parent_id {
         debug!("  Parent VM ID: {}", parent_id);
@@ -347,17 +316,6 @@ fn run() -> io::Result<()> {
 
     if let Some(parent_id) = args.parent_id {
         info!("Created forked VM (from parent {})", parent_id);
-
-        // For forked VMs, map feedback buffer immediately if it exists and dump is requested
-        if args.dump_feedback.is_some() {
-            if let Ok(Some(_info)) = vm.get_feedback_buffer_info() {
-                if let Err(e) = vm.map_feedback_buffer() {
-                    warn!("Failed to map feedback buffer: {}", e);
-                } else {
-                    info!("Feedback buffer mapped (inherited from parent)");
-                }
-            }
-        }
     } else {
         info!(
             "Created VM with {} MB guest memory",
@@ -416,11 +374,6 @@ fn run() -> io::Result<()> {
             boot_config = boot_config.initramfs(data);
         }
 
-        if let Some(ref input) = args.input {
-            debug!("Serial input: {} bytes queued", input.len());
-            boot_config = boot_config.serial_input(input.as_bytes());
-        }
-
         // Setup Linux boot (GDT, page tables, MP tables, boot_params, registers)
         debug!("Setting up Linux boot structures...");
         let boot_info = vm.setup_linux_boot(&boot_config).map_err(io_error)?;
@@ -461,7 +414,9 @@ fn run() -> io::Result<()> {
     // Run VM
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
-    let timeout_duration = args.timeout.map(std::time::Duration::from_secs_f64);
+    let timeout_duration = args
+        .wall_clock_timeout
+        .map(std::time::Duration::from_secs_f64);
 
     loop {
         // Check wall-clock timeout
@@ -521,27 +476,11 @@ fn run() -> io::Result<()> {
                             exit.emulated_tsc, vt, vm_id
                         );
 
-                        // Dump feedback buffer if requested
-                        if let Some(ref path) = args.dump_feedback {
-                            dump_feedback_buffer(&mut vm, path)?;
-                        }
-
                         maybe_wait_for_ctrl_c(args.wait);
                         break;
                     }
                     ExitKind::FeedbackBufferRegistered => {
-                        // Map the feedback buffer for later dumping
-                        if args.dump_feedback.is_some() {
-                            if let Err(e) = vm.map_feedback_buffer() {
-                                warn!("Failed to map feedback buffer: {}", e);
-                            } else {
-                                info!("Feedback buffer registered and mapped");
-                            }
-                        } else {
-                            debug!(
-                                "Feedback buffer registered (not mapping, --dump-feedback not set)"
-                            );
-                        }
+                        debug!("Feedback buffer registered");
                         continue;
                     }
                     ExitKind::IoResponse => {

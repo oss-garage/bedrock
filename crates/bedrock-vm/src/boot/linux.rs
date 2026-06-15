@@ -47,8 +47,6 @@ pub struct LinuxBootConfig<'a> {
     pub initramfs: Option<&'a [u8]>,
     /// Kernel command line.
     pub cmdline: &'a str,
-    /// Optional serial input to queue.
-    pub serial_input: Option<&'a [u8]>,
 }
 
 impl<'a> LinuxBootConfig<'a> {
@@ -64,7 +62,6 @@ impl<'a> LinuxBootConfig<'a> {
             kernel_end,
             initramfs: None,
             cmdline: "",
-            serial_input: None,
         }
     }
 
@@ -79,12 +76,6 @@ impl<'a> LinuxBootConfig<'a> {
     /// The initramfs will be placed after the kernel, aligned to a 2MB boundary.
     pub fn initramfs(mut self, data: &'a [u8]) -> Self {
         self.initramfs = Some(data);
-        self
-    }
-
-    /// Set serial input to queue for the guest.
-    pub fn serial_input(mut self, input: &'a [u8]) -> Self {
-        self.serial_input = Some(input);
         self
     }
 }
@@ -117,7 +108,6 @@ impl Vm {
     /// - boot_params structure (zero page) per Linux boot protocol
     /// - Command line
     /// - Initial CPU registers
-    /// - Serial input (if configured)
     ///
     /// The kernel should already be loaded into guest memory before calling this.
     /// If initramfs is provided, it will be copied to guest memory after the kernel,
@@ -129,7 +119,6 @@ impl Vm {
     /// - This is a forked VM (no direct memory access)
     /// - The initramfs would exceed guest memory bounds
     /// - Setting registers fails
-    /// - Setting serial input fails
     ///
     /// # Example
     ///
@@ -217,14 +206,6 @@ impl Vm {
             source: e,
         })?;
 
-        // Set serial input if provided
-        if let Some(input) = config.serial_input {
-            self.set_input(input).map_err(|e| VmError::Ioctl {
-                operation: "SET_INPUT",
-                source: e,
-            })?;
-        }
-
         Ok(LinuxBootInfo {
             gdt_base,
             gdt_limit,
@@ -242,14 +223,12 @@ mod tests {
     fn test_linux_boot_config_builder() {
         let config = LinuxBootConfig::new(0x1000000, 0x2000000)
             .cmdline("console=ttyS0")
-            .initramfs(&[1, 2, 3])
-            .serial_input(&[4, 5, 6]);
+            .initramfs(&[1, 2, 3]);
 
         assert_eq!(config.kernel_entry, 0x1000000);
         assert_eq!(config.kernel_end, 0x2000000);
         assert_eq!(config.cmdline, "console=ttyS0");
         assert!(config.initramfs.is_some());
-        assert!(config.serial_input.is_some());
     }
 
     #[test]
@@ -260,6 +239,5 @@ mod tests {
         assert_eq!(config.kernel_end, 0x2000000);
         assert_eq!(config.cmdline, "");
         assert!(config.initramfs.is_none());
-        assert!(config.serial_input.is_none());
     }
 }

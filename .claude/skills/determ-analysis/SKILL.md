@@ -121,7 +121,7 @@ exits become records via these flags (it lowers them to bedrock-cli's `--exit-ca
 
 Additional modifiers:
 - `--no-memory-hash` — skip memory hashing (memory_hash will be 0)
-- `--exit-after-tsc TSC` — only start capturing exits after this TSC value
+- `--capture-exits-after-tsc TSC` — only start capturing exits after this TSC value
 - `--single-step START-END` — MTF single-stepping in a TSC range (TscRange capture)
 - `--intercept-pf` — trap guest #PF exceptions
 

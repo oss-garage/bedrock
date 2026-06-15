@@ -60,7 +60,7 @@ let
         " -i ${guestInitrd}"
         " ${guestKernel}/vmlinux"
         " --stop-at-vt 10.0"
-        " --timeout 300"
+        " --wall-clock-timeout 300"
         " >&2"
       )
       ${pkgs.lib.optionalString (bitcoinInitrd != null) ''

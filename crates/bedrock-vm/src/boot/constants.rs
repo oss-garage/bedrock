@@ -75,7 +75,7 @@ pub mod mptable {
 
 /// Default values for boot configuration.
 pub mod defaults {
-    pub const MEMORY_MB: usize = 1024;
+    pub const MEMORY_MB: usize = 5120;
     // The kernel console is the paravirtual batch console (hvc0), registered
     // by the guest `bedrock-console.ko` module — one VMCALL per printk line
     // instead of one VMX I/O exit per byte through the emulated 8250.

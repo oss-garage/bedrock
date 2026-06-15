@@ -6,7 +6,6 @@ use std::mem::size_of;
 
 use super::config::{EventConfig, SingleStepConfig};
 use super::exit::VmExit;
-use super::serial::SerialInput;
 use super::stats::ExitStats;
 use crate::rdrand::RdrandConfig;
 use crate::Regs;
@@ -61,21 +60,19 @@ pub(crate) const BEDROCK_CREATE_ROOT_VM: u64 =
 pub(crate) const BEDROCK_VM_GET_REGS: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 1, size_of::<Regs>());
 pub(crate) const BEDROCK_VM_SET_REGS: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 2, size_of::<Regs>());
 pub(crate) const BEDROCK_VM_RUN: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 3, size_of::<VmExit>());
-pub(crate) const BEDROCK_VM_SET_INPUT: u64 =
-    ioctl_iow(BEDROCK_IOC_MAGIC, 4, size_of::<SerialInput>());
 pub(crate) const BEDROCK_VM_SET_RDRAND_CONFIG: u64 =
-    ioctl_iow(BEDROCK_IOC_MAGIC, 5, size_of::<RdrandConfig>());
+    ioctl_iow(BEDROCK_IOC_MAGIC, 4, size_of::<RdrandConfig>());
 pub(crate) const BEDROCK_VM_SET_RDRAND_VALUE: u64 =
-    ioctl_iow(BEDROCK_IOC_MAGIC, 6, size_of::<u64>());
+    ioctl_iow(BEDROCK_IOC_MAGIC, 5, size_of::<u64>());
 pub(crate) const BEDROCK_VM_SET_SINGLE_STEP: u64 =
-    ioctl_iow(BEDROCK_IOC_MAGIC, 8, size_of::<SingleStepConfig>());
+    ioctl_iow(BEDROCK_IOC_MAGIC, 6, size_of::<SingleStepConfig>());
 pub(crate) const BEDROCK_VM_GET_EXIT_STATS: u64 =
-    ioctl_ior(BEDROCK_IOC_MAGIC, 9, size_of::<ExitStats>());
-pub(crate) const BEDROCK_VM_SET_STOP_TSC: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 10, size_of::<u64>());
-pub(crate) const BEDROCK_VM_GET_VM_ID: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 11, size_of::<u64>());
+    ioctl_ior(BEDROCK_IOC_MAGIC, 7, size_of::<ExitStats>());
+pub(crate) const BEDROCK_VM_SET_STOP_TSC: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 8, size_of::<u64>());
+pub(crate) const BEDROCK_VM_GET_VM_ID: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 9, size_of::<u64>());
 /// Unified event-stream configuration (enable + category mask + exit trigger).
 pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u64 =
-    ioctl_iow(BEDROCK_IOC_MAGIC, 15, size_of::<EventConfig>());
+    ioctl_iow(BEDROCK_IOC_MAGIC, 13, size_of::<EventConfig>());
 
 // Device ioctls (on /dev/bedrock)
 // _IOW('B', 1, u64) - takes parent VM ID as argument
@@ -94,10 +91,10 @@ pub struct FeedbackBufferInfoRequest {
     pub _reserved: u32,
 }
 
-// _IOR('B', 12, FeedbackBufferInfoRequest) - get feedback buffer registration info
+// _IOR('B', 10, FeedbackBufferInfoRequest) - get feedback buffer registration info
 pub(crate) const BEDROCK_VM_GET_FEEDBACK_BUFFER_INFO: u64 = ioctl_ior(
     BEDROCK_IOC_MAGIC,
-    12,
+    10,
     size_of::<FeedbackBufferInfoRequest>(),
 );
 
@@ -147,13 +144,13 @@ impl Default for IoActionPayload {
     }
 }
 
-// _IOW('B', 13, IoActionPayload) - queue an I/O channel request for the guest
+// _IOW('B', 11, IoActionPayload) - queue an I/O channel request for the guest
 pub(crate) const BEDROCK_VM_QUEUE_IO_ACTION: u64 =
-    ioctl_iow(BEDROCK_IOC_MAGIC, 13, size_of::<IoActionPayload>());
+    ioctl_iow(BEDROCK_IOC_MAGIC, 11, size_of::<IoActionPayload>());
 
-// _IOR('B', 14, IoActionPayload) - drain the most recent I/O channel response
+// _IOR('B', 12, IoActionPayload) - drain the most recent I/O channel response
 pub(crate) const BEDROCK_VM_DRAIN_IO_RESPONSE: u64 =
-    ioctl_ior(BEDROCK_IOC_MAGIC, 14, size_of::<IoActionPayload>());
+    ioctl_ior(BEDROCK_IOC_MAGIC, 12, size_of::<IoActionPayload>());
 
 /// Maximum length of a feedback-buffer identifier. Must stay in lockstep with
 /// `bedrock_vmx::FEEDBACK_BUFFER_ID_MAX_LEN` — the kernel module writes that

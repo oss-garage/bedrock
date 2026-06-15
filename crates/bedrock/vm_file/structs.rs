@@ -27,45 +27,42 @@ pub(crate) const BEDROCK_VM_SET_REGS: u32 = _IOW::<BedrockRegs>(BEDROCK_IOC_MAGI
 /// Ioctl number for RUN command - run the VM until exit.
 pub(crate) const BEDROCK_VM_RUN: u32 = _IOR::<BedrockVmExit>(BEDROCK_IOC_MAGIC, 3);
 
-/// Ioctl number for SET_INPUT command - set serial input buffer.
-pub(crate) const BEDROCK_VM_SET_INPUT: u32 = _IOW::<BedrockSerialInput>(BEDROCK_IOC_MAGIC, 4);
-
 /// Ioctl number for SET_RDRAND_CONFIG command - configure RDRAND emulation.
 pub(crate) const BEDROCK_VM_SET_RDRAND_CONFIG: u32 =
-    _IOW::<BedrockRdrandConfig>(BEDROCK_IOC_MAGIC, 5);
+    _IOW::<BedrockRdrandConfig>(BEDROCK_IOC_MAGIC, 4);
 
 /// Ioctl number for SET_RDRAND_VALUE command - set pending RDRAND value.
-pub(crate) const BEDROCK_VM_SET_RDRAND_VALUE: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 6);
+pub(crate) const BEDROCK_VM_SET_RDRAND_VALUE: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 5);
 
 /// Ioctl number for SET_SINGLE_STEP command - configure MTF single-stepping.
 pub(crate) const BEDROCK_VM_SET_SINGLE_STEP: u32 =
-    _IOW::<BedrockSingleStepConfig>(BEDROCK_IOC_MAGIC, 8);
+    _IOW::<BedrockSingleStepConfig>(BEDROCK_IOC_MAGIC, 6);
 
 /// Ioctl number for GET_EXIT_STATS command - retrieve exit handler performance statistics.
-pub(crate) const BEDROCK_VM_GET_EXIT_STATS: u32 = _IOR::<BedrockExitStats>(BEDROCK_IOC_MAGIC, 9);
+pub(crate) const BEDROCK_VM_GET_EXIT_STATS: u32 = _IOR::<BedrockExitStats>(BEDROCK_IOC_MAGIC, 7);
 
 /// Ioctl number for SET_STOP_TSC command - stop VM when TSC reaches this value.
-pub(crate) const BEDROCK_VM_SET_STOP_TSC: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 10);
+pub(crate) const BEDROCK_VM_SET_STOP_TSC: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 8);
 
 /// Ioctl number for GET_VM_ID command - get the VM's unique identifier.
-pub(crate) const BEDROCK_VM_GET_VM_ID: u32 = _IOR::<u64>(BEDROCK_IOC_MAGIC, 11);
+pub(crate) const BEDROCK_VM_GET_VM_ID: u32 = _IOR::<u64>(BEDROCK_IOC_MAGIC, 9);
 
 /// Ioctl number for GET_FEEDBACK_BUFFER_INFO command - get feedback buffer registration info.
 /// Takes BedrockFeedbackBufferInfoRequest with index, returns BedrockFeedbackBufferInfo.
 pub(crate) const BEDROCK_VM_GET_FEEDBACK_BUFFER_INFO: u32 =
-    _IOR::<BedrockFeedbackBufferInfoRequest>(BEDROCK_IOC_MAGIC, 12);
+    _IOR::<BedrockFeedbackBufferInfoRequest>(BEDROCK_IOC_MAGIC, 10);
 
 /// Ioctl number for QUEUE_IO_ACTION command - queue an I/O channel request.
 pub(crate) const BEDROCK_VM_QUEUE_IO_ACTION: u32 =
-    _IOW::<BedrockIoActionPayload>(BEDROCK_IOC_MAGIC, 13);
+    _IOW::<BedrockIoActionPayload>(BEDROCK_IOC_MAGIC, 11);
 
 /// Ioctl number for DRAIN_IO_RESPONSE command - drain the most recent I/O channel response.
 pub(crate) const BEDROCK_VM_DRAIN_IO_RESPONSE: u32 =
-    _IOR::<BedrockIoActionPayload>(BEDROCK_IOC_MAGIC, 14);
+    _IOR::<BedrockIoActionPayload>(BEDROCK_IOC_MAGIC, 12);
 
 /// Ioctl number for SET_EVENT_CONFIG command - unified event-stream configuration.
 pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u32 =
-    _IOW::<BedrockEventConfig>(BEDROCK_IOC_MAGIC, 15);
+    _IOW::<BedrockEventConfig>(BEDROCK_IOC_MAGIC, 13);
 
 /// Maximum I/O channel payload size (one 4KB page).
 pub(crate) const BEDROCK_IO_CHANNEL_BUF_SIZE: usize = 4096;
@@ -142,20 +139,6 @@ pub(crate) struct BedrockFeedbackBufferInfo {
     pub _reserved: u32,
     /// Identifier bytes; trailing bytes past `id_len` are zero.
     pub id: [u8; FEEDBACK_BUFFER_ID_MAX_LEN],
-}
-
-/// Maximum size of serial input buffer.
-pub(crate) const SERIAL_INPUT_MAX_SIZE: usize = 256;
-
-/// Serial input buffer passed from userspace via ioctl.
-#[repr(C)]
-pub(crate) struct BedrockSerialInput {
-    /// Length of valid data in buf.
-    pub len: u32,
-    /// Reserved for alignment.
-    pub _reserved: u32,
-    /// Input data buffer.
-    pub buf: [u8; SERIAL_INPUT_MAX_SIZE],
 }
 
 /// RDRAND emulation configuration passed from userspace.

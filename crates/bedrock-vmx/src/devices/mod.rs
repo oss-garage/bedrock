@@ -18,4 +18,4 @@ pub use ioapic::{IoApicState, IOAPIC_NUM_PINS};
 pub use mtrr::{MtrrState, MTRR_VAR_MAX};
 pub use rdrand::{RdrandMode, RdrandState};
 pub use rtc::RtcState;
-pub use serial::{SerialState, SERIAL_INPUT_MAX_SIZE};
+pub use serial::SerialState;

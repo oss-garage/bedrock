@@ -17,7 +17,8 @@ use clap::Parser;
 use bedrock_vm::{ExitRecord, ExitStats, Vm, DEFAULT_TSC_FREQUENCY};
 
 const DEFAULT_RUNS: usize = 10;
-const DEFAULT_MEMORY_MB: usize = 3072;
+// Sourced from bedrock-cli's default so the two tools stay in lockstep.
+const DEFAULT_MEMORY_MB: usize = bedrock_vm::boot::defaults::MEMORY_MB;
 
 #[derive(Parser, Debug)]
 #[command(name = "bedrock-determinism")]
@@ -50,9 +51,9 @@ struct Args {
     #[arg(short = 'n', long, default_value_t = DEFAULT_RUNS)]
     runs: usize,
 
-    /// RDRAND seed
-    #[arg(short = 's', long)]
-    seed: Option<u64>,
+    /// Seed/value for RDRAND
+    #[arg(short = 's', long = "rdrand-seed")]
+    rdrand_seed: Option<u64>,
 
     /// Stop VM when emulated TSC reaches this value
     #[arg(long = "stop-at-tsc", conflicts_with = "stop_at_vt")]
@@ -81,16 +82,16 @@ struct Args {
 
     /// Capture exit records only after emulated TSC reaches this threshold.
     /// Applies to all capture modes (checkpoints, single-step, etc.)
-    #[arg(long = "exit-after-tsc")]
-    exit_after_tsc: Option<u64>,
+    #[arg(long = "capture-exits-after-tsc")]
+    capture_exits_after_tsc: Option<u64>,
 
     /// Parent VM ID for forked VM testing (passes --parent-id to CLI)
     #[arg(long = "parent-id", value_parser = parse_u64)]
     parent_id: Option<u64>,
 
     /// Wall-clock timeout in seconds for each VM run (default: 10)
-    #[arg(long = "timeout", default_value_t = 10.0)]
-    timeout: f64,
+    #[arg(long = "wall-clock-timeout", default_value_t = 10.0)]
+    wall_clock_timeout: f64,
 
     /// Capture every deterministic exit (high overhead, large event streams)
     #[arg(long = "all-exits")]
@@ -231,7 +232,7 @@ fn generate_test_dir_name(args: &Args, vmlinux: &str) -> String {
     }
 
     // Seed
-    if let Some(seed) = args.seed {
+    if let Some(seed) = args.rdrand_seed {
         parts.push(format!("seed{:#x}", seed));
     }
 
@@ -622,7 +623,7 @@ fn write_config_file(args: &Args, vmlinux: &str, cli_path: &Path) -> io::Result<
         writeln!(f, "cmdline: {}", cmdline)?;
     }
     writeln!(f, "runs: {}", args.runs)?;
-    if let Some(seed) = args.seed {
+    if let Some(seed) = args.rdrand_seed {
         writeln!(f, "seed: {:#x}", seed)?;
     }
     if let Some(stop_tsc) = args.stop_at_tsc {
@@ -637,8 +638,8 @@ fn write_config_file(args: &Args, vmlinux: &str, cli_path: &Path) -> io::Result<
     if let Some((start, end)) = args.single_step {
         writeln!(f, "single_step: {}-{}", start, end)?;
     }
-    if let Some(tsc) = args.exit_after_tsc {
-        writeln!(f, "exit_after_tsc: {}", tsc)?;
+    if let Some(tsc) = args.capture_exits_after_tsc {
+        writeln!(f, "capture_exits_after_tsc: {}", tsc)?;
     }
     if let Some(parent_id) = args.parent_id {
         writeln!(f, "parent_id: {}", parent_id)?;
@@ -653,7 +654,7 @@ fn write_config_file(args: &Args, vmlinux: &str, cli_path: &Path) -> io::Result<
         writeln!(f, "intercept_pf: true")?;
     }
     writeln!(f, "parallel: {}", args.parallel)?;
-    writeln!(f, "timeout: {}s", args.timeout)?;
+    writeln!(f, "wall_clock_timeout: {}s", args.wall_clock_timeout)?;
 
     Ok(())
 }
@@ -874,16 +875,16 @@ fn run_parallel(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::Ex
             let initramfs = args.initramfs.clone();
             let cmdline = args.cmdline.clone();
             let memory = args.memory;
-            let seed = args.seed;
+            let seed = args.rdrand_seed;
             let stop_at_tsc = args.stop_at_tsc.or_else(|| {
                 args.stop_at_vt
                     .map(|vt| (vt * DEFAULT_TSC_FREQUENCY as f64) as u64)
             });
             let checkpoint_interval = args.checkpoint_interval;
             let single_step = args.single_step;
-            let exit_after_tsc = args.exit_after_tsc;
+            let exit_after_tsc = args.capture_exits_after_tsc;
             let parent_id = args.parent_id;
-            let timeout = args.timeout;
+            let timeout = args.wall_clock_timeout;
             let all_exits = args.all_exits;
             let no_memory_hash = args.no_memory_hash;
             let intercept_pf = args.intercept_pf;
@@ -1076,16 +1077,16 @@ fn run_vm(
         args.initramfs.as_deref(),
         args.cmdline.as_deref(),
         args.memory,
-        args.seed,
+        args.rdrand_seed,
         args.stop_at_tsc.or_else(|| {
             args.stop_at_vt
                 .map(|vt| (vt * DEFAULT_TSC_FREQUENCY as f64) as u64)
         }),
         args.checkpoint_interval,
         args.single_step,
-        args.exit_after_tsc,
+        args.capture_exits_after_tsc,
         args.parent_id,
-        args.timeout,
+        args.wall_clock_timeout,
         args.all_exits,
         args.no_memory_hash,
         args.intercept_pf,
@@ -1176,12 +1177,12 @@ fn run_vm_inner(
         cmd.arg("--single-step").arg(format!("{}-{}", start, end));
     }
     if let Some(tsc) = exit_after_tsc {
-        cmd.arg("--exit-after-tsc").arg(tsc.to_string());
+        cmd.arg("--capture-exits-after-tsc").arg(tsc.to_string());
     }
     if let Some(id) = parent_id {
         cmd.arg("--parent-id").arg(id.to_string());
     }
-    cmd.arg("--timeout").arg(timeout.to_string());
+    cmd.arg("--wall-clock-timeout").arg(timeout.to_string());
 
     let exit_stats_file = run_dir.join("exit-stats.json");
     cmd.arg("--exit-stats-json").arg(&exit_stats_file);
