@@ -20,7 +20,10 @@ runners:
       chmod -R a+rX /home/admin/linux
       ln -sfn /home/admin/.cargo  /home/runner/.cargo
       ln -sfn /home/admin/.rustup /home/runner/.rustup
-      echo 'extra-trusted-users = runner' >> /etc/nix/nix.conf
-      systemctl restart nix-daemon.service 2>/dev/null || true
+      # Trust `runner` so cachix can configure the binary cache. cachix parses
+      # nix.conf and only recognizes a literal `trusted-users` line. Restart so
+      # the daemon reloads it (trusted-users is read only at daemon startup).
+      echo 'trusted-users = root runner' >> /etc/nix/nix.conf
+      systemctl restart nix-daemon.service 2>/dev/null || pkill nix-daemon 2>/dev/null || true
       systemctl start nix-daemon.socket 2>/dev/null || true
       chmod a+rx /nix /nix/var /nix/var/nix /nix/var/nix/daemon-socket 2>/dev/null || true

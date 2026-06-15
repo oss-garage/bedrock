@@ -41,6 +41,9 @@ jobs:
     runs-on: runs-on=${{ github.run_id }}/runner=m7i-nested-virt
     steps:
       - uses: actions/checkout@v4
+      # The image only has the default Nix profile on PATH; cachix-action
+      # installs cachix into the per-user profile, so add that to PATH too.
+      - run: echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
       - uses: cachix/cachix-action@v15
         with:
           name: bedrock
