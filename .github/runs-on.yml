@@ -1,0 +1,22 @@
+images:
+  ci-debian-linux618-rust:
+    platform: linux
+    arch: x64
+    ami: "ami-0cd7ca984e2941992"
+
+runners:
+  m7i-nested-virt:
+    family: ["m7i.2xlarge"]
+    image: ci-debian-linux618-rust
+    spot: price-capacity-optimized
+    nested-virt: true
+    # The kernel build tree and rust toolchain in this image belong to the
+    # `admin` user, but runs-on executes jobs as `runner`. Grant `runner`
+    # access to both so the module build works without sudo. Runs as root
+    # before the agent starts.
+    # TODO: bake this setup into the image
+    preinstall: |
+      chmod a+x /home/admin
+      chmod -R a+rX /home/admin/linux
+      ln -sfn /home/admin/.cargo  /home/runner/.cargo
+      ln -sfn /home/admin/.rustup /home/runner/.rustup
