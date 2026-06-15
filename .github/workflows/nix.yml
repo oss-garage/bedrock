@@ -54,4 +54,4 @@ jobs:
       - run: sudo rmmod kvm || true
       - run: PATH="$HOME/.cargo/bin:/usr/lib/llvm-18/bin:$PATH" just build
       - run: sudo just load
-      - run: sudo env "PATH=$PATH" nix run .#test-native
+      - run: nix run .#test-native
