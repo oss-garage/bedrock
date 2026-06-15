@@ -20,3 +20,7 @@ runners:
       chmod -R a+rX /home/admin/linux
       ln -sfn /home/admin/.cargo  /home/runner/.cargo
       ln -sfn /home/admin/.rustup /home/runner/.rustup
+      echo 'extra-trusted-users = runner' >> /etc/nix/nix.conf
+      systemctl restart nix-daemon.service 2>/dev/null || true
+      systemctl start nix-daemon.socket 2>/dev/null || true
+      chmod a+rx /nix /nix/var /nix/var/nix /nix/var/nix/daemon-socket 2>/dev/null || true
