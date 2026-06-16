@@ -38,7 +38,7 @@ jobs:
 
   integration-test:
     name: Integration tests
-    runs-on: runs-on=${{ github.run_id }}/runner=m7i-nested-virt
+    runs-on: runs-on=${{ github.run_id }}/runner=m7i-metal
     steps:
       - uses: actions/checkout@v4
       # The image only has the default Nix profile on PATH; cachix-action
