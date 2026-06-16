@@ -71,7 +71,11 @@ pub struct IoResponse {
     /// Dispatch status (0 = the action ran; negative = an errno from the guest
     /// module before the command could run).
     pub status: i32,
-    /// Exit code of the bash command itself.
+    /// Raw `call_usermodehelper(UMH_WAIT_PROC)` return value reported by the
+    /// guest, verbatim. For a command that ran this is a wait(2)-encoded status
+    /// (`kernel_wait`) — the real exit code lives in bits 8-15, *not* a bare
+    /// exit code — and a negative value is a guest-side errno. Use
+    /// [`exit_code_from_wait_status`] to turn it into a conventional exit code.
     pub exit_code: i32,
     /// Bytes of output the guest wrote into the output feedback buffer (0 when
     /// the request did not set [`IO_FLAG_RECORD_OUTPUT`]).
@@ -147,6 +151,28 @@ pub fn decode_response(bytes: &[u8]) -> Option<IoResponse> {
     })
 }
 
+/// Interpret a raw `call_usermodehelper(UMH_WAIT_PROC)` return value (as
+/// carried in [`IoResponse::exit_code`]) as a conventional process exit code.
+///
+/// When the command ran, the guest hands back the wait(2)-encoded status from
+/// `kernel_wait`, where the exit code lives in bits 8-15 and a terminating
+/// signal in bits 0-6 — so the raw value for `exit 7` is `7 << 8 == 1792`, not
+/// `7`. This mirrors libc's `WEXITSTATUS` for a normal exit and the shell's
+/// `128 + signo` convention when the process was killed by a signal. A negative
+/// value is an errno from the guest module before the command could run and is
+/// passed through unchanged.
+pub fn exit_code_from_wait_status(raw: i32) -> i32 {
+    if raw < 0 {
+        raw
+    } else if raw & 0x7f != 0 {
+        // Terminated by a signal: report it the way a shell would.
+        128 + (raw & 0x7f)
+    } else {
+        // Normal exit: WEXITSTATUS(raw).
+        (raw >> 8) & 0xff
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +221,17 @@ mod tests {
             })
         );
         assert_eq!(decode_response(b"xxxx"), None);
+    }
+
+    #[test]
+    fn exit_status_decodes_to_exit_code() {
+        // Normal exit: the code sits in bits 8-15 (WEXITSTATUS).
+        assert_eq!(exit_code_from_wait_status(0), 0);
+        assert_eq!(exit_code_from_wait_status(7 << 8), 7);
+        assert_eq!(exit_code_from_wait_status(255 << 8), 255);
+        // Killed by a signal: shell-style 128 + signo.
+        assert_eq!(exit_code_from_wait_status(9), 128 + 9); // SIGKILL
+                                                            // Guest-side errno: passed through untouched.
+        assert_eq!(exit_code_from_wait_status(-22), -22); // -EINVAL
     }
 }

@@ -894,7 +894,9 @@ impl Branch {
         };
         Ok(BashOutput {
             status: r.status,
-            exit_code: r.exit_code,
+            // `r.exit_code` is the raw wait-status the guest got back from
+            // call_usermodehelper; decode it into a conventional exit code.
+            exit_code: bedrock_vm::io_channel::exit_code_from_wait_status(r.exit_code),
             output,
         })
     }
