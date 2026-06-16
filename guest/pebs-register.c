@@ -23,22 +23,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define HYPERCALL_REGISTER_PEBS_PAGE 3
-#define PAGE_SIZE 4096
+#include "libvmcall.h"
 
-static uint64_t register_pebs_page(void *page) {
-    uint64_t result;
-    __asm__ volatile(
-        "mov $3, %%rax\n\t"   // HYPERCALL_REGISTER_PEBS_PAGE = 3
-        "mov %1, %%rbx\n\t"   // RBX = page virtual address
-        "vmcall\n\t"
-        "mov %%rax, %0\n\t"
-        : "=r"(result)
-        : "r"((uint64_t)page)
-        : "rax", "rbx"
-    );
-    return result;
-}
+#define PAGE_SIZE 4096
 
 int main(void) {
     void *page = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE,
@@ -60,8 +47,8 @@ int main(void) {
     }
 
     printf("Registering PEBS scratch page at %p...\n", page);
-    uint64_t result = register_pebs_page(page);
-    if (result == 0) {
+    uint64_t result = vmcall_register_pebs_page(page);
+    if (result == VMCALL_OK) {
         printf("PEBS scratch page registered successfully; pinning page\n");
         // Sleep forever to keep the mmap'd page pinned for the lifetime of
         // the guest. If we exited, the kernel would reclaim the page and
@@ -77,18 +64,18 @@ int main(void) {
     // Failure codes mirror RegisterPebsPageResult in
     // crates/bedrock-vmx/src/exits/pebs.rs. Decode them for diagnostics.
     fprintf(stderr, "PEBS registration failed (rax=0x%lx): ", result);
-    if (result == UINT64_MAX) {
+    if (result == VMCALL_PEBS_ERR_UNSUPPORTED) {
         fprintf(stderr, "host CPU does not support EPT-friendly PEBS "
                         "(IA32_PERF_CAPABILITIES.PEBS_BASELINE clear, "
                         "or running under a hypervisor that doesn't expose "
                         "PEBS to nested guests — common with KVM L1)\n");
-    } else if (result == UINT64_MAX - 1) {
+    } else if (result == VMCALL_PEBS_ERR_UNALIGNED) {
         fprintf(stderr, "page address not 4KB-aligned\n");
-    } else if (result == UINT64_MAX - 2) {
+    } else if (result == VMCALL_PEBS_ERR_WALK_FAILED) {
         fprintf(stderr, "guest page-table walk failed\n");
-    } else if (result == UINT64_MAX - 3) {
+    } else if (result == VMCALL_PEBS_ERR_NO_EPT) {
         fprintf(stderr, "EPT mapping missing — page not faulted in?\n");
-    } else if (result == UINT64_MAX - 4) {
+    } else if (result == VMCALL_PEBS_ERR_ALREADY) {
         fprintf(stderr, "PEBS page already registered\n");
     } else {
         fprintf(stderr, "unknown error (not running in bedrock VM?)\n");

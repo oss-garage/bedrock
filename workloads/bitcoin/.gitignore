@@ -1,1 +1,7 @@
 images.tar
+
+# Staged by build.sh from guest/libvmcall.h into each Docker build context
+# (single source of truth lives at guest/libvmcall.h). Normally removed on
+# exit; ignored here in case a build is interrupted before cleanup.
+miner/libvmcall.h
+shutdown/libvmcall.h

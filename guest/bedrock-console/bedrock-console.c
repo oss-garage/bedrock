@@ -52,8 +52,7 @@
 #include <linux/tty_port.h>
 #include <linux/types.h>
 
-#define HYPERCALL_SERIAL_REGISTER_PAGE 8ULL
-#define HYPERCALL_SERIAL_WRITE         9ULL
+#include "libvmcall.h"
 
 #define BEDROCK_CONSOLE_PAGE_SIZE 4096U
 
@@ -72,27 +71,11 @@
 static void *shared_page;
 static DEFINE_SPINLOCK(page_lock);
 
-/*
- * VMCALL helper. As in bedrock-io.c, the "memory" clobber is load-bearing:
- * it forces the compiler to complete the stores into `shared_page` before
- * the VMCALL, so the hypervisor observes them. Do NOT add a `nomem` option.
- */
-static inline __u64 vmcall1(__u64 nr, __u64 arg1)
-{
-	__u64 result;
-
-	asm volatile("vmcall"
-		     : "=a"(result)
-		     : "a"(nr), "b"(arg1)
-		     : "memory");
-	return result;
-}
-
 /* Flush the staged `fill` bytes in the shared page to the hypervisor. */
 static inline void bedrock_flush(unsigned int fill)
 {
 	if (fill)
-		vmcall1(HYPERCALL_SERIAL_WRITE, fill);
+		vmcall_serial_write(fill);
 }
 
 /*
@@ -222,8 +205,8 @@ static int __init bedrock_console_init(void)
 	 * Register the page before anything can write to it (register_console
 	 * below may flush immediately).
 	 */
-	rc = vmcall1(HYPERCALL_SERIAL_REGISTER_PAGE, (__u64)shared_page);
-	if (rc != 0) {
+	rc = vmcall_serial_register_page(shared_page);
+	if (rc != VMCALL_OK) {
 		pr_err("bedrock-console: HYPERCALL_SERIAL_REGISTER_PAGE failed: %#llx\n",
 		       rc);
 		free_page((unsigned long)shared_page);

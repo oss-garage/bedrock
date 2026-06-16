@@ -1,0 +1,259 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * libvmcall — guest-side library for bedrock's hypercall interface.
+ *
+ * Any guest code (userspace programs or kernel modules) can include this
+ * header to call out to the hypervisor. The library is header-only, so there
+ * is nothing to link. Hypercalls are issued with the VMCALL instruction, the
+ * hypercall number in RAX, arguments in RBX/RCX/RDX/RSI/RDI, and the result
+ * returned in RAX.
+ *
+ * The hypercall numbers and ABI mirror the hypervisor side; the source of
+ * truth is crates/bedrock-vmx/src/hypercalls.rs and the dispatcher in
+ * crates/bedrock-vmx/src/exits/vmcall.rs. Keep this header in sync with them.
+ *
+ * This header is dependency-free (no libc / no kernel headers) so it works in
+ * both build environments. vmcall_u64 is the 64-bit register-width type used
+ * for every argument and result.
+ *
+ * The library is header-only: every primitive and wrapper is `static inline`
+ * so any guest code can use it by just including this header — there is no
+ * object to link. This is what lets the independently-built consumers (the
+ * standalone pebs-register userspace program and the bedrock-io /
+ * bedrock-console out-of-tree kernel modules, each compiled from its own
+ * isolated source tree) share one implementation.
+ */
+
+#ifndef BEDROCK_LIBVMCALL_H
+#define BEDROCK_LIBVMCALL_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef unsigned long long vmcall_u64;
+
+/* ------------------------------------------------------------------------- */
+/* Hypercall numbers (RAX). See crates/bedrock-vmx/src/hypercalls.rs.         */
+/* ------------------------------------------------------------------------- */
+
+/* Shut the VM down cleanly. No arguments; does not return to the guest. */
+#define HYPERCALL_SHUTDOWN 0ULL
+
+/* Trigger a snapshot; exits to userspace and logs VM state if enabled. */
+#define HYPERCALL_SNAPSHOT 1ULL
+
+/*
+ * Register a feedback buffer for fuzzing.
+ *   RBX = buffer GVA
+ *   RCX = buffer size in bytes (1..=VMCALL_FEEDBACK_BUFFER_MAX_SIZE)
+ *   RDX = identifier GVA (pointer to id bytes in guest memory)
+ *   RSI = identifier length (1..=VMCALL_FEEDBACK_BUFFER_ID_MAX_LEN)
+ * Returns the assigned slot index on success, or VMCALL_ERR on failure.
+ */
+#define HYPERCALL_REGISTER_FEEDBACK_BUFFER 2ULL
+
+/* Register a 4KB PEBS scratch page. RBX = page GVA (must be 4KB-aligned). */
+#define HYPERCALL_REGISTER_PEBS_PAGE 3ULL
+
+/* Register the 4KB shared I/O channel page. RBX = page GVA (4KB-aligned). */
+#define HYPERCALL_IO_REGISTER_PAGE 4ULL
+
+/*
+ * Fetch the pending I/O request into the registered shared page.
+ * Returns request length in bytes, 0 if none pending, VMCALL_ERR on error.
+ */
+#define HYPERCALL_IO_GET_REQUEST 5ULL
+
+/* Deliver an I/O response. RBX = response length (clamped to PAGE_SIZE). */
+#define HYPERCALL_IO_PUT_RESPONSE 6ULL
+
+/* Signal the guest has finished boot/init and is ready for the workload. */
+#define HYPERCALL_READY 7ULL
+
+/* Register the 4KB shared console page. RBX = page GVA (4KB-aligned). */
+#define HYPERCALL_SERIAL_REGISTER_PAGE 8ULL
+
+/* Emit bytes from the registered console page. RBX = byte count (<=PAGE). */
+#define HYPERCALL_SERIAL_WRITE 9ULL
+
+/* ------------------------------------------------------------------------- */
+/* ABI constants.                                                            */
+/* ------------------------------------------------------------------------- */
+
+/* Generic failure sentinel returned in RAX by most hypercalls ((u64)-1). */
+#define VMCALL_ERR ((vmcall_u64)~0ULL)
+
+/* Generic success sentinel for hypercalls that return 0 on success. */
+#define VMCALL_OK ((vmcall_u64)0ULL)
+
+/* Page size of every shared/registered page. */
+#define VMCALL_PAGE_SIZE 4096U
+
+/* Feedback buffer limits (FEEDBACK_BUFFER_MAX_PAGES * 4096 = 1 MB, and the
+ * id length cap). Mirrors the hypervisor's constants. */
+#define VMCALL_FEEDBACK_BUFFER_MAX_SIZE (256U * 4096U)
+#define VMCALL_FEEDBACK_BUFFER_ID_MAX_LEN 64U
+
+/*
+ * PEBS registration failure codes returned in RAX (mirror
+ * RegisterPebsPageResult in crates/bedrock-vmx/src/exits/pebs.rs).
+ */
+#define VMCALL_PEBS_ERR_UNSUPPORTED VMCALL_ERR          /* (u64)-1 */
+#define VMCALL_PEBS_ERR_UNALIGNED (VMCALL_ERR - 1ULL)   /* (u64)-2 */
+#define VMCALL_PEBS_ERR_WALK_FAILED (VMCALL_ERR - 2ULL) /* (u64)-3 */
+#define VMCALL_PEBS_ERR_NO_EPT (VMCALL_ERR - 3ULL)      /* (u64)-4 */
+#define VMCALL_PEBS_ERR_ALREADY (VMCALL_ERR - 4ULL)     /* (u64)-5 */
+
+/* ------------------------------------------------------------------------- */
+/* Generic VMCALL primitives — hypercall number plus up to five arguments.   */
+/*                                                                           */
+/* The "memory" clobber inside these is load-bearing: it forces the compiler */
+/* to complete stores into any shared page before the VMCALL and to re-read   */
+/* memory the hypervisor may have written afterwards. Use these directly for  */
+/* hypercalls the named wrappers below don't cover.                          */
+/* ------------------------------------------------------------------------- */
+
+static inline vmcall_u64 vmcall0(vmcall_u64 nr)
+{
+	vmcall_u64 result;
+
+	asm volatile("vmcall" : "=a"(result) : "a"(nr) : "memory");
+	return result;
+}
+
+static inline vmcall_u64 vmcall1(vmcall_u64 nr, vmcall_u64 a1)
+{
+	vmcall_u64 result;
+
+	asm volatile("vmcall" : "=a"(result) : "a"(nr), "b"(a1) : "memory");
+	return result;
+}
+
+static inline vmcall_u64 vmcall2(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2)
+{
+	vmcall_u64 result;
+
+	asm volatile("vmcall"
+		     : "=a"(result)
+		     : "a"(nr), "b"(a1), "c"(a2)
+		     : "memory");
+	return result;
+}
+
+static inline vmcall_u64 vmcall3(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2,
+				 vmcall_u64 a3)
+{
+	vmcall_u64 result;
+
+	asm volatile("vmcall"
+		     : "=a"(result)
+		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3)
+		     : "memory");
+	return result;
+}
+
+static inline vmcall_u64 vmcall4(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2,
+				 vmcall_u64 a3, vmcall_u64 a4)
+{
+	vmcall_u64 result;
+
+	asm volatile("vmcall"
+		     : "=a"(result)
+		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
+		     : "memory");
+	return result;
+}
+
+static inline vmcall_u64 vmcall5(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2,
+				 vmcall_u64 a3, vmcall_u64 a4, vmcall_u64 a5)
+{
+	vmcall_u64 result;
+
+	asm volatile("vmcall"
+		     : "=a"(result)
+		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4), "D"(a5)
+		     : "memory");
+	return result;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Named hypercall wrappers.                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* Shut the VM down. Does not return if the hypervisor honours the request. */
+static inline void vmcall_shutdown(void)
+{
+	vmcall0(HYPERCALL_SHUTDOWN);
+}
+
+/* Trigger a snapshot. */
+static inline void vmcall_snapshot(void)
+{
+	vmcall0(HYPERCALL_SNAPSHOT);
+}
+
+/* Signal that the guest has finished boot/init and is ready. */
+static inline void vmcall_ready(void)
+{
+	vmcall0(HYPERCALL_READY);
+}
+
+/*
+ * Register a feedback buffer. `buf`/`size` describe the buffer; `id`/`id_len`
+ * an identifier the host groups results under. Returns the assigned slot
+ * index (>= 0) on success, or VMCALL_ERR on failure.
+ */
+static inline vmcall_u64 vmcall_register_feedback_buffer(const void *buf,
+							 vmcall_u64 size,
+							 const void *id,
+							 vmcall_u64 id_len)
+{
+	return vmcall4(HYPERCALL_REGISTER_FEEDBACK_BUFFER, (vmcall_u64)buf,
+		       size, (vmcall_u64)id, id_len);
+}
+
+/* Register a 4KB PEBS scratch page. Returns VMCALL_OK or a VMCALL_PEBS_ERR_*. */
+static inline vmcall_u64 vmcall_register_pebs_page(const void *page)
+{
+	return vmcall1(HYPERCALL_REGISTER_PEBS_PAGE, (vmcall_u64)page);
+}
+
+/* Register the 4KB shared I/O channel page. Returns VMCALL_OK / VMCALL_ERR. */
+static inline vmcall_u64 vmcall_io_register_page(const void *page)
+{
+	return vmcall1(HYPERCALL_IO_REGISTER_PAGE, (vmcall_u64)page);
+}
+
+/*
+ * Fetch the pending I/O request into the registered shared page. Returns the
+ * request length, 0 if none pending, VMCALL_ERR on error.
+ */
+static inline vmcall_u64 vmcall_io_get_request(void)
+{
+	return vmcall0(HYPERCALL_IO_GET_REQUEST);
+}
+
+/* Deliver an I/O response of `len` bytes. Returns VMCALL_OK / VMCALL_ERR. */
+static inline vmcall_u64 vmcall_io_put_response(vmcall_u64 len)
+{
+	return vmcall1(HYPERCALL_IO_PUT_RESPONSE, len);
+}
+
+/* Register the 4KB shared console page. Returns VMCALL_OK / VMCALL_ERR. */
+static inline vmcall_u64 vmcall_serial_register_page(const void *page)
+{
+	return vmcall1(HYPERCALL_SERIAL_REGISTER_PAGE, (vmcall_u64)page);
+}
+
+/* Emit `len` bytes from the registered console page. Returns OK / ERR. */
+static inline vmcall_u64 vmcall_serial_write(vmcall_u64 len)
+{
+	return vmcall1(HYPERCALL_SERIAL_WRITE, len);
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* BEDROCK_LIBVMCALL_H */
