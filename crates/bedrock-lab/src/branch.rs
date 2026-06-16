@@ -15,7 +15,7 @@ use crate::error::{LabError, Result};
 use crate::event::{emit_feedback_buffer_registered, serial_record_into_sink, Event, PartialLine};
 use crate::inner::{BranchMeta, LabInner};
 use crate::rng::{InputRecording, InputSource, IoInput};
-use crate::time::VirtTime;
+use crate::time::{VirtDuration, VirtTime};
 use crate::tree::Tree;
 
 /// Event categories the lab forces on while a branch has an [`InputSource`]
@@ -646,6 +646,16 @@ impl Branch {
                 kind => return Ok((at, RunOutcome::Yielded { kind })),
             }
         }
+    }
+
+    /// Run the branch forward by `by` virtual time, relative to its current
+    /// time.
+    ///
+    /// Convenience wrapper over [`run_until`](Self::run_until): advances to
+    /// [`current_time`](Self::current_time)` + by` and returns the same
+    /// `(VirtTime, RunOutcome)` pair. `by`'s frequency must match the tree's.
+    pub fn run_for(&mut self, by: VirtDuration) -> Result<(VirtTime, RunOutcome)> {
+        self.run_until(self.current_time + by)
     }
 
     /// Queue an I/O action and pump the VM until the response arrives.
