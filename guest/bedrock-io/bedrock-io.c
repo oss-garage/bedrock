@@ -68,10 +68,7 @@
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
 
-#define HYPERCALL_REGISTER_FEEDBACK_BUFFER 2ULL
-#define HYPERCALL_IO_REGISTER_PAGE         4ULL
-#define HYPERCALL_IO_GET_REQUEST           5ULL
-#define HYPERCALL_IO_PUT_RESPONSE          6ULL
+#include "libvmcall.h"
 
 /*
  * Pin number must match `IO_CHANNEL_IRQ` on the hypervisor side and the MP
@@ -149,47 +146,6 @@ static atomic_t worker_counter = ATOMIC_INIT(0);
  * is exactly the regime we have to survive deterministically. */
 #define BEDROCK_IO_WORK_POOL_MIN 16
 static mempool_t *work_pool;
-
-/*
- * VMCALL helpers. The "memory" clobber is load-bearing — without it the
- * compiler is free to cache the shared page contents across the VMCALL,
- * which would let HYPERCALL_IO_GET_REQUEST's writes into the page go
- * unobserved on the subsequent read.
- */
-static inline __u64 vmcall1(__u64 nr, __u64 arg1)
-{
-	__u64 result;
-
-	asm volatile("vmcall"
-		     : "=a"(result)
-		     : "a"(nr), "b"(arg1)
-		     : "memory");
-	return result;
-}
-
-static inline __u64 vmcall0(__u64 nr)
-{
-	__u64 result;
-
-	asm volatile("vmcall"
-		     : "=a"(result)
-		     : "a"(nr)
-		     : "memory");
-	return result;
-}
-
-/* Four-argument VMCALL (RBX/RCX/RDX/RSI) — used to register the output
- * feedback buffer. */
-static inline __u64 vmcall4(__u64 nr, __u64 a1, __u64 a2, __u64 a3, __u64 a4)
-{
-	__u64 result;
-
-	asm volatile("vmcall"
-		     : "=a"(result)
-		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
-		     : "memory");
-	return result;
-}
 
 /*
  * IRQ handler — runs in hardirq context, must not block. Just allocate a
@@ -473,8 +429,8 @@ static void bedrock_io_work_fn(struct work_struct *work)
 	 * any moment.
 	 */
 	mutex_lock(&page_mutex);
-	req_len = vmcall0(HYPERCALL_IO_GET_REQUEST);
-	if (req_len == 0 || req_len == ~0ULL) {
+	req_len = vmcall_io_get_request();
+	if (req_len == 0 || req_len == VMCALL_ERR) {
 		/* No request available — either the hypervisor drained the
 		 * queue first or this is a spurious IRQ. Both benign. */
 		mutex_unlock(&page_mutex);
@@ -595,7 +551,7 @@ respond:
 	resp_hdr.output_len = (__u32)data_read;
 	memcpy(shared_page, &resp_hdr, sizeof(resp_hdr));
 
-	vmcall1(HYPERCALL_IO_PUT_RESPONSE, sizeof(resp_hdr));
+	vmcall_io_put_response(sizeof(resp_hdr));
 	mutex_unlock(&page_mutex);
 
 	/*
@@ -703,10 +659,9 @@ static int __init bedrock_io_init(void)
 	 * Register the output feedback buffer so recorded command output has
 	 * somewhere to go before the first request arrives.
 	 */
-	rc = vmcall4(HYPERCALL_REGISTER_FEEDBACK_BUFFER, (__u64)output_buf,
-		     BEDROCK_IO_OUTPUT_SIZE, (__u64)output_id,
-		     sizeof(output_id) - 1);
-	if (rc == ~0ULL) {
+	rc = vmcall_register_feedback_buffer(output_buf, BEDROCK_IO_OUTPUT_SIZE,
+					     output_id, sizeof(output_id) - 1);
+	if (rc == VMCALL_ERR) {
 		pr_err("bedrock-io: HYPERCALL_REGISTER_FEEDBACK_BUFFER failed\n");
 		mempool_destroy(work_pool);
 		destroy_workqueue(io_wq);
@@ -720,8 +675,8 @@ static int __init bedrock_io_init(void)
 	 * write request bytes — without this, the channel IRQ would deliver
 	 * but the GET_REQUEST hypercall would fail.
 	 */
-	rc = vmcall1(HYPERCALL_IO_REGISTER_PAGE, (__u64)shared_page);
-	if (rc != 0) {
+	rc = vmcall_io_register_page(shared_page);
+	if (rc != VMCALL_OK) {
 		pr_err("bedrock-io: HYPERCALL_IO_REGISTER_PAGE failed: %#llx\n",
 		       rc);
 		mempool_destroy(work_pool);

@@ -17,6 +17,14 @@ DOCKER="${DOCKER:-docker}"
 # the miner image).
 $DOCKER pull docker.io/bitcoin/bitcoin:latest
 
+# Stage the shared guest hypercall library (header-only libvmcall.h) into each
+# Docker build context. Docker's COPY can't reach files outside the build
+# context, so the single source at guest/libvmcall.h is copied in here and
+# removed on exit — keeping one source of truth instead of committed dupes.
+trap 'rm -f miner/libvmcall.h shutdown/libvmcall.h' EXIT
+cp ../../guest/libvmcall.h miner/libvmcall.h
+cp ../../guest/libvmcall.h shutdown/libvmcall.h
+
 # Workload-specific images with bedrock binaries baked in.
 $DOCKER build -t bedrock/bitcoin-miner:latest miner/
 $DOCKER build -t bedrock/shutdown:latest      shutdown/

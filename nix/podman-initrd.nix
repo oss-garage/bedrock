@@ -28,7 +28,9 @@ let
   bedrockPebsRegister = pkgs.pkgsStatic.stdenv.mkDerivation {
     name = "bedrock-pebs-register";
     dontUnpack = true;
-    buildPhase = "$CC -O2 -static -o bedrock-pebs-register ${../guest/pebs-register.c}";
+    # -I${../guest} puts the header-only libvmcall.h on the include path so
+    # pebs-register.c's `#include "libvmcall.h"` resolves.
+    buildPhase = "$CC -O2 -static -I${../guest} -o bedrock-pebs-register ${../guest/pebs-register.c}";
     installPhase = "mkdir -p $out/bin && cp bedrock-pebs-register $out/bin/";
   };
 
@@ -60,6 +62,11 @@ let
     dontPatchELF = true;
 
     NIX_CFLAGS_COMPILE = "-Wno-unused-command-line-argument";
+
+    # The module shares the guest-side hypercall library. It is header-only
+    # (static inline), so copying libvmcall.h into the build dir is enough for
+    # `#include "libvmcall.h"` to resolve — no extra object to link.
+    preBuild = "cp ${../guest/libvmcall.h} ./libvmcall.h";
 
     buildPhase = ''
       runHook preBuild
@@ -96,6 +103,9 @@ let
     dontPatchELF = true;
 
     NIX_CFLAGS_COMPILE = "-Wno-unused-command-line-argument";
+
+    # Shares the header-only guest hypercall library; see bedrockIoModule.
+    preBuild = "cp ${../guest/libvmcall.h} ./libvmcall.h";
 
     buildPhase = ''
       runHook preBuild

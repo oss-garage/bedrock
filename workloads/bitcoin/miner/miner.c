@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include "libvmcall.h"
+
 // Feedback buffer layout:
 // - Bytes 0-7: Number of blocks mined (u64, little-endian)
 // - Bytes 8+: Block hashes (32 bytes each, newest first)
@@ -17,9 +19,6 @@
 #define HEADER_SIZE 8  // u64 block count
 #define MAX_HASHES ((FEEDBACK_BUFFER_SIZE - HEADER_SIZE) / BLOCK_HASH_SIZE)
 
-// Hypercall numbers
-#define HYPERCALL_REGISTER_FEEDBACK_BUFFER 2
-
 // String identifier this miner registers its feedback buffer under. Multiple
 // miner instances sharing this id let the host union their per-process
 // coverage maps into a single domain.
@@ -27,28 +26,14 @@
 
 static uint8_t *feedback_buffer = NULL;
 
-// Register the feedback buffer with the hypervisor.
-//
-// ABI (registers): RAX = hypercall number, RBX = buffer GVA, RCX = buffer
-// size, RDX = id GVA, RSI = id length. Returns the assigned slot index in
-// RAX on success (0..15) or u64::MAX on failure.
+// Register the feedback buffer with the hypervisor. Returns 0 on success,
+// -1 on failure. See libvmcall.h / crates/bedrock-vmx/src/hypercalls.rs for
+// the ABI; the wrapper returns the assigned slot index on success or
+// VMCALL_ERR on failure.
 static int register_feedback_buffer(void *buffer, size_t size,
                                     const void *id, size_t id_len) {
-    uint64_t result;
-    __asm__ volatile(
-        "mov $2, %%rax\n\t"          // HYPERCALL_REGISTER_FEEDBACK_BUFFER = 2
-        "mov %1, %%rbx\n\t"          // RBX = buffer address
-        "mov %2, %%rcx\n\t"          // RCX = size
-        "mov %3, %%rdx\n\t"          // RDX = id pointer
-        "mov %4, %%rsi\n\t"          // RSI = id length
-        "vmcall\n\t"
-        "mov %%rax, %0\n\t"          // result = RAX (slot index or -1)
-        : "=r"(result)
-        : "r"((uint64_t)buffer), "r"((uint64_t)size),
-          "r"((uint64_t)id), "r"((uint64_t)id_len)
-        : "rax", "rbx", "rcx", "rdx", "rsi"
-    );
-    return (result == (uint64_t)-1) ? -1 : 0;
+    return (vmcall_register_feedback_buffer(buffer, size, id, id_len) ==
+            VMCALL_ERR) ? -1 : 0;
 }
 
 // Get the current block count from the feedback buffer
