@@ -13,13 +13,26 @@ obj-m := bedrock.o
 # Link the Rust module with our C helpers and assembly
 bedrock-y := helpers.o vmx_support.o
 
-all:
+# Host-specific PEBS margin, generated from CPUID by the shared generator that
+# the cargo build (build.rs) also uses. `vmx` is a symlink to ../bedrock-vmx/src.
+RUSTC ?= rustc
+MARGIN_GEN := gen_pebs_margin
+MARGIN_RS := vmx/exits/pebs_margin_generated.rs
+
+# Keep `all` as the default goal: it must stay the first rule in this file, since
+# `make` (with no target) builds whichever target appears first.
+all: $(MARGIN_RS)
 	$(MAKE) -C $(KDIR) M=$(CURDIR) LLVM=$(LLVM) \
 		KCFLAGS=-Wno-error=unused-command-line-argument \
 		KAFLAGS=-Wno-error=unused-command-line-argument modules
 
+$(MARGIN_RS): ../../contrib/gen_pebs_margin.rs
+	$(RUSTC) -O $< -o $(MARGIN_GEN)
+	./$(MARGIN_GEN) $@
+
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+	rm -f $(MARGIN_GEN) $(MARGIN_RS)
 
 load:
 	@echo "Reloading bedrock kernel module..."

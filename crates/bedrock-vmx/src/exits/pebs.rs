@@ -246,7 +246,9 @@ pub const PEBS_MIN_DELTA: u64 = 257;
 /// always arrives at the requested deadline rather than off-by-one. The
 /// MTF single-step path (`update_mtf_state` in `exits/mod.rs`) takes over
 /// once the count is within `PEBS_MARGIN` of the target.
-pub const PEBS_MARGIN: u64 = 2;
+pub const PEBS_MARGIN: u64 = PEBS_MARGIN_GENERATED;
+
+include!("pebs_margin_generated.rs");
 
 /// Outcome of arming a precise exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
