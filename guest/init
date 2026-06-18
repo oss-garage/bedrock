@@ -42,6 +42,17 @@ mount -t tmpfs -o mode=1777 tmpfs /dev/shm
 mount -t devpts devpts /dev/pts
 mount -t cgroup2 cgroup2 /sys/fs/cgroup
 
+# Send kernel printk to the journal only, not straight to the console.
+# journald imports /dev/kmsg, and the `journalctl -f` tail started later
+# renders it on the serial console. Without this, every kernel line — e.g.
+# bedrock-io's per-command worker traces — would print twice: once via the
+# printk console (console=hvc0) and once via journalctl. Lowering
+# console_loglevel to 1 keeps the printk console quiet for everything below
+# KERN_EMERG, so a panic is still visible directly even if journald is wedged.
+# (The kernel's pre-init boot banner, printed before /init runs, still reaches
+# the console natively; it also appears once in the journal.)
+echo 1 > /proc/sys/kernel/printk
+
 # Create directories needed for containers and networking
 mkdir -p /run/netns /var/run/netns /run/containers/storage /var/lib/cni /var/tmp
 
@@ -56,13 +67,6 @@ mkdir -p /run/netns /var/run/netns /run/containers/storage /var/lib/cni /var/tmp
 insmod /lib/modules/bedrock-console.ko || \
     echo "bedrock-console: insmod failed (continuing without batch console)"
 
-# Register a PEBS scratch page with the hypervisor so precise VM exits
-# (timer interrupt injection, stop-at-tsc) can trap on EPT writes. The
-# program registers, then blocks forever to keep the page pinned, so we
-# background it. Failure is expected outside bedrock; the workload runs
-# regardless.
-bedrock-pebs-register &
-
 # Load the deterministic I/O channel module. Must come after the
 # filesystem is in place (kernel_read_file_from_path needs /tmp on
 # tmpfs) but before podman-compose, since the I/O actions exec into
@@ -71,9 +75,6 @@ bedrock-pebs-register &
 insmod /lib/modules/bedrock-io.ko || \
     echo "bedrock-io: insmod failed (continuing without I/O channel)"
 
-# Reset podman state
-podman system reset -f 2>/dev/null || true
-
 # Redirect output to the console. /dev/console now routes to the
 # paravirtual batch console (hvc0): bedrock-console.ko registers a tty
 # whose .write batches whole buffers to the hypervisor in one VMCALL, and
@@ -81,11 +82,6 @@ podman system reset -f 2>/dev/null || true
 # and this userspace output go through hvc0, one VM exit per line instead
 # of one per byte through the emulated 8250.
 exec >/dev/console 2>&1
-
-echo "=== Podman Initrd ==="
-
-# Set up loopback
-ip link set lo up
 
 # Start systemd-journald standalone (no PID 1 systemd). conmon
 # connects to its socket directly when `log_driver = "journald"`
@@ -97,12 +93,25 @@ ip link set lo up
 # below tails — no per-container follower bookkeeping, no
 # re-attach loops on stop/start.
 mkdir -p /run/systemd/journal /run/log/journal
-@systemd@/lib/systemd/systemd-journald &
+@systemd@/lib/systemd/systemd-journald 2> /dev/null &
 # Wait for the socket so the first podman/conmon connect doesn't
 # race the daemon's bind.
 while [ ! -S /run/systemd/journal/socket ]; do
     sleep 0.05
 done
+
+# Register a PEBS scratch page with the hypervisor so precise VM exits
+# (timer interrupt injection, stop-at-tsc) can trap on EPT writes. The
+# program registers, then blocks forever to keep the page pinned, so we
+# background it. Failure is expected outside bedrock; the workload runs
+# regardless.
+bedrock-pebs-register | systemd-cat -t init &
+
+# Reset podman state
+podman system reset -f 2>&1 | systemd-cat -t init || true
+
+# Set up loopback
+ip link set lo up | systemd-cat -t init 
 
 # Shared assertion sink: an append-only JSONL file. The host-side workload
 # monitor appends to it, and containers.conf bind-mounts it into every
@@ -132,29 +141,39 @@ workload-monitor 2>&1 | systemd-cat -t workload-monitor &
 # `podman load` reads the embedded manifest to recover each image's
 # original name+tag, so a compose file referencing those names works
 # unchanged.
-podman load -i /images/images.tar
-rm -f /images/images.tar
-echo "Loaded images:"
-podman images
+podman load -i /images/images.tar 2>&1 | systemd-cat -t init
+rm -f /images/images.tar | systemd-cat -t init
+echo "Loaded images:" | systemd-cat -t init
+podman images 2>&1 | systemd-cat -t init
 
 # Run workload detached. Container output and lifecycle events both
 # flow into journald (log_driver = journald, events_logger =
 # journald in containers.conf); bedrock-io's exec actions feed it
 # via systemd-cat. journalctl -f -o json then drains the unified
-# stream, and a small jq filter renders each record back to the
-# `[name] | message` human format with a deterministic per-source
-# color (sum of label bytes modulo the 31..36 palette). This
-# replaces the previous per-container follow-loop entirely — restart
-# resilience is now journald's problem, not ours.
+# stream as structured JSON records and the host renders them for
+# display. This replaces the previous per-container follow-loop
+# entirely — restart resilience is now journald's problem, not ours.
 cd /workload
-podman-compose up -d
+podman-compose up -d | systemd-cat -t init
 
-journalctl -f -o json --no-tail | jq -r --unbuffered '
-    ((.CONTAINER_NAME // .SYSLOG_IDENTIFIER) // "kernel") as $label |
-    (($label | explode | add // 0) % 6 + 31) as $color |
-    ((.MESSAGE // "") | rtrimstr("\n")) as $msg |
-    "[\u001b[\($color)m\($label)\u001b[0m] | \($msg)"
-' &
+# The journal is the single console source for the runtime phase: it carries
+# container output, the systemd-cat tags (assertions, workload-monitor,
+# bedrock-io exec output) AND kernel printk (journald imports /dev/kmsg). The
+# printk console itself is silenced in stage 2 (console_loglevel=1), so kernel
+# lines reach the serial console only here — once — instead of twice.
+# Project each record down to the two fields the host needs: SYSLOG_IDENTIFIER
+# (the source label) and MESSAGE. SYSLOG_IDENTIFIER alone identifies every
+# source — conmon sets it to the container name for container output, systemd-cat
+# sets it to the `-t` tag (assertions, workload-monitor, init, bedrock-io exec),
+# and kernel records carry "kernel" — so CONTAINER_NAME is redundant.
+# `journalctl -o json` always emits every field (and forces protected ones like
+# __CURSOR, the timestamps and _BOOT_ID, which --output-fields can't drop), so
+# filter with jq. `-c` keeps one compact object per line; `-M` forces monochrome
+# (jq writes to the hvc0 TTY and would otherwise colourise); `--unbuffered`
+# flushes per line so the host sees records live. The host (bedrock-cli) renders
+# each record as `[source] | message` with a per-source colour; tests parse the
+# records directly.
+journalctl -f -o json --no-tail | jq -cM --unbuffered '{SYSLOG_IDENTIFIER, MESSAGE}' &
 
 # Block until the shutdown VMCALL terminates the VM.
 wait

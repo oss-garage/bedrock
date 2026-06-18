@@ -69,6 +69,14 @@ let
     # Serial console (bedrock uses serial for guest output)
     ./scripts/config --enable SERIAL_8250
     ./scripts/config --enable SERIAL_8250_CONSOLE
+    # Use COM1's hardwired IRQ 4 instead of auto-probing it. With
+    # DETECT_IRQ set (the x86 default), STD_COMX_FLAGS gains UPF_AUTO_IRQ,
+    # so the 8250 driver runs autoconfig_irq() — which writes a lone 0xFF to
+    # the transmit register to provoke an IRQ. bedrock faithfully captures
+    # that byte as console output, where it surfaces as a stray U+FFFD on the
+    # serial log. bedrock already routes COM1 on IRQ 4 (see boot/mptable.rs),
+    # so the probe is pointless; disabling it removes the spurious transmit.
+    ./scripts/config --disable SERIAL_8250_DETECT_IRQ
 
     # Filesystems
     ./scripts/config --enable EXT4_FS

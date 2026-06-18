@@ -118,6 +118,7 @@
 
 pub mod boot;
 mod builder;
+pub mod console;
 mod error;
 pub mod events;
 pub mod io_channel;
@@ -128,6 +129,7 @@ mod vm;
 pub use bedrock_vmx::exit_record::{ExitRecord, EXIT_RECORD_FLAG_DETERMINISTIC, EXIT_RECORD_SIZE};
 pub use boot::{load_kernel, LinuxBootConfig, LinuxBootInfo};
 pub use builder::VmBuilder;
+pub use console::ConsoleLine;
 pub use error::VmError;
 pub use events::{
     category_of, write_jsonl as write_events_jsonl,

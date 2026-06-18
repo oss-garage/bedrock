@@ -2,9 +2,10 @@
 //!
 //! At guest boot the `workload-monitor` service watches `podman events` and, on
 //! every container or `podman exec` death, emits an exit-code [`Assertion`]. The
-//! pipeline renders each assertion onto the serial console as an
-//! `[assertions] | <json>` line — the same stream the host-side oracle reads.
-//! These tests observe assertions there (via `Event::SerialLine`, captured by
+//! pipeline surfaces each assertion onto the serial console inside a compact
+//! journald JSON record (`{"SYSLOG_IDENTIFIER":"assertions","MESSAGE":<json>}`;
+//! see `guest/init`) — the same stream the host-side oracle reads. These tests
+//! observe assertions there (via `Event::SerialLine`, captured by
 //! [`common::capture_sink`]) and decode them back into [`Assertion`]s, covering
 //! both the monitor and the `bedrock-assertions` wire format. The on-disk sink
 //! the pipeline uses internally is an implementation detail and is never
@@ -23,6 +24,7 @@
 
 use bedrock_assertions::{Assertion, Condition};
 use bedrock_lab::{BashTarget, Branch};
+use bedrock_vm::ConsoleLine;
 
 use crate::common;
 
@@ -30,42 +32,30 @@ use crate::common;
 /// with `EXEC_DEATH_MSG` in `guest/workload-monitor/src/main.rs`.
 const EXEC_DEATH_MSG: &str = "exec exit code is zero";
 
-/// Serial-log prefix the pipeline renders for each assertion. The journalctl
-/// formatter in `nix/podman-initrd.nix` tags the sink's lines `assertions` and
-/// prints them as `[assertions] | <message>` (here `<message>` is the
-/// serialized [`Assertion`]).
-const ASSERTION_LINE_PREFIX: &str = "[assertions] | ";
+/// The journald `SYSLOG_IDENTIFIER` the assertion sink's lines carry. `guest/init`
+/// pipes `/bedrock/assertions.jsonl` through `systemd-cat -t assertions`, so each
+/// assertion reaches the serial console inside a journal record tagged this.
+const ASSERTION_TAG: &str = "assertions";
 
-/// Strip ANSI SGR escape sequences (`ESC [ … m`) — the serial formatter wraps
-/// each line's source label in a colour code — leaving plain text.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // Drop through the sequence terminator ('m' for the SGR codes the
-            // formatter emits).
-            for esc in chars.by_ref() {
-                if esc == 'm' {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Decode one serial line into an [`Assertion`] if it is an assertion record
-/// (`[assertions] | <json>`), else `None`. A line carrying the assertion tag
-/// whose payload is not valid `bedrock-assertions` JSON fails the test — the
-/// wire format the oracle parses must hold.
+/// Decode one serial line into an [`Assertion`] if it is an assertion record,
+/// else `None`.
+///
+/// The runtime console carries one compact journald JSON object per line, which
+/// [`ConsoleLine::parse`] classifies (see `guest/init`). An assertion is a
+/// [`ConsoleLine::Journal`] record tagged [`ASSERTION_TAG`] whose `MESSAGE` is
+/// the serialized [`Assertion`]. A line tagged `assertions` whose payload is not
+/// valid `bedrock-assertions` JSON fails the test — the wire format the oracle
+/// parses must hold.
 fn assertion_from_serial(raw: &str) -> Option<Assertion> {
-    let line = strip_ansi(raw);
-    let json = line.trim().strip_prefix(ASSERTION_LINE_PREFIX)?.trim();
+    let ConsoleLine::Journal { source, message } = ConsoleLine::parse(raw) else {
+        return None;
+    };
+    if source != ASSERTION_TAG {
+        return None;
+    }
+    let json = message.trim();
     Some(serde_json::from_str::<Assertion>(json).unwrap_or_else(|e| {
-        panic!("`[assertions]` serial line is not a valid Assertion: {e}\njson: {json}")
+        panic!("`assertions` serial line is not a valid Assertion: {e}\njson: {json}")
     }))
 }
 

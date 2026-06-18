@@ -15,8 +15,9 @@ use log::{debug, info, trace, warn};
 use bedrock_vm::events::EventKind;
 use bedrock_vm::io_channel;
 use bedrock_vm::{
-    load_kernel, EventCategories, EventConfig, EventStream, ExitKind, ExitStatsReport, ExitTrigger,
-    LinuxBootConfig, RdrandConfig, Vm, VmBuilder, BEDROCK_DEVICE_PATH, DEFAULT_TSC_FREQUENCY,
+    load_kernel, ConsoleLine, EventCategories, EventConfig, EventStream, ExitKind, ExitStatsReport,
+    ExitTrigger, LinuxBootConfig, RdrandConfig, Vm, VmBuilder, BEDROCK_DEVICE_PATH,
+    DEFAULT_TSC_FREQUENCY,
 };
 
 use args::{Args, IoAction, RdrandMode, ScheduledIoAction};
@@ -63,7 +64,7 @@ impl LineBufferedOutput {
             }
             if ch == '\n' {
                 let secs = self.line_tsc as f64 / tsc_frequency as f64;
-                println!("[vt {:>8.3}] {}", secs, self.buffer);
+                println!("[vt {:>8.3}] {}", secs, render_console_line(&self.buffer));
                 self.buffer.clear();
             } else {
                 self.buffer.push(ch);
@@ -81,6 +82,33 @@ impl LineBufferedOutput {
             self.buffer.clear();
         }
     }
+}
+
+/// Render a completed console line for display.
+///
+/// A [`ConsoleLine::Journal`] record is shown in the human `[source] | message`
+/// form, with the source tinted by a colour derived from the label so each
+/// source stays visually distinct. A [`ConsoleLine::Raw`] line — raw kernel
+/// printk emitted before the guest's `journalctl` tail starts, or any
+/// non-record line — is shown verbatim.
+fn render_console_line(line: &str) -> String {
+    match ConsoleLine::parse(line) {
+        ConsoleLine::Journal { source, message } => {
+            let color = source_color(&source);
+            format!(
+                "[\u{1b}[{color}m{source}\u{1b}[0m] | {}",
+                message.trim_end_matches('\n')
+            )
+        }
+        ConsoleLine::Raw(raw) => raw,
+    }
+}
+
+/// Pick an ANSI SGR foreground colour (31..=36) for a source label, matching
+/// the palette the guest's old jq formatter used: the sum of the label's
+/// Unicode scalar values modulo the six-colour range.
+fn source_color(label: &str) -> u32 {
+    label.chars().map(|c| c as u32).sum::<u32>() % 6 + 31
 }
 
 fn main() {

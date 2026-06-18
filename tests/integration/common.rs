@@ -48,7 +48,7 @@ static SINK: OnceLock<Arc<CaptureSink>> = OnceLock::new();
 /// Tree-wide [`EventSink`] that retains each branch's `Exit` records (so
 /// determinism tests can compare guest state across sibling branches) and its
 /// serial-console lines (so tests can observe guest output — e.g. the assertion
-/// pipeline's `[assertions] | …` lines — the way the host oracle does).
+/// pipeline's journald JSON records — the way the host oracle does).
 ///
 /// One sink serves the whole tree (every branch, across parallel test
 /// threads), so records are bucketed by [`BranchId`]. Only branches that turn
@@ -140,8 +140,8 @@ impl EventSink for CaptureSink {
             }
             // Serial output: SERIAL capture is forced on for every branch, so
             // each complete console line — including the assertion pipeline's
-            // rendered lines — surfaces here. Retain per branch so tests can
-            // observe it. `line` borrows a per-branch buffer; copy it out.
+            // journald JSON records — surfaces here. Retain per branch so tests
+            // can observe it. `line` borrows a per-branch buffer; copy it out.
             Event::SerialLine { branch, line, .. } => {
                 self.serial
                     .lock()
