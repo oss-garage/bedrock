@@ -12,18 +12,24 @@
 //!
 //! These tests drive a real VM through `bedrock-lab`, which talks to
 //! `/dev/bedrock` — so they require the bedrock kernel module loaded and the
-//! guest images supplied via environment:
+//! guest images supplied via environment. The initrd is the generic podman
+//! initrd, which downloads its workload files at boot over the file-transmission
+//! hypercall, so the workload's `compose.yaml` and `images.tar` host paths must
+//! also be supplied (the harness serves them):
 //!
 //! ```text
 //! BEDROCK_VMLINUX=/path/to/vmlinux \
-//! BEDROCK_INITRAMFS=/path/to/integration-tests-initrd \
+//! BEDROCK_INITRAMFS=/path/to/podman-initrd \
+//! BEDROCK_COMPOSE=/path/to/workloads/integration-tests/compose.yaml \
+//! BEDROCK_IMAGES=/path/to/workloads/integration-tests/images.tar \
 //!     cargo test -p bedrock-integration-tests
 //! ```
 //!
-//! The `integration-tests` CI job wires this up against the Nix-built guest
-//! kernel and `integration-testsInitrd`. When the device or the env vars are
-//! absent (e.g. a plain `just test` on a dev box), [`ready_checkpoint`]
-//! returns `None` and each test early-returns as a skip, keeping
+//! The `integration-tests` nix app wires all four up against the Nix-built
+//! guest kernel, the generic `podmanInitrd`, and the staged workload files.
+//! When the device or any of these env vars is absent (e.g. a plain
+//! `just test` on a dev box), [`ready_checkpoint`] returns `None` and each test
+//! early-returns as a skip (printing exactly what is missing), keeping
 //! `cargo test` green.
 
 use std::collections::HashMap;
@@ -161,15 +167,30 @@ pub fn capture_sink() -> Arc<CaptureSink> {
         .clone()
 }
 
+/// The guest-image environment needed to boot a VM.
+struct GuestEnv {
+    vmlinux: String,
+    initramfs: String,
+    /// Workload files served to the guest over the file-transmission hypercall
+    /// (the generic podman initrd downloads them at boot): `compose.yaml` and
+    /// `images.tar` host paths.
+    compose: String,
+    images: String,
+}
+
 /// Whether the environment can actually run a VM: the bedrock device node is
-/// present and both guest-image paths are set.
-fn can_run() -> Option<(String, String)> {
+/// present, the kernel + initrd paths are set, and the workload files the guest
+/// downloads at boot are set.
+fn can_run() -> Option<GuestEnv> {
     if !Path::new(bedrock_vm::BEDROCK_DEVICE_PATH).exists() {
         return None;
     }
-    let vmlinux = std::env::var("BEDROCK_VMLINUX").ok()?;
-    let initramfs = std::env::var("BEDROCK_INITRAMFS").ok()?;
-    Some((vmlinux, initramfs))
+    Some(GuestEnv {
+        vmlinux: std::env::var("BEDROCK_VMLINUX").ok()?,
+        initramfs: std::env::var("BEDROCK_INITRAMFS").ok()?,
+        compose: std::env::var("BEDROCK_COMPOSE").ok()?,
+        images: std::env::var("BEDROCK_IMAGES").ok()?,
+    })
 }
 
 /// The shared ready checkpoint, booted on first use, or `None` if this
@@ -182,27 +203,48 @@ fn can_run() -> Option<(String, String)> {
 ///     return common::skip("boot to ready");
 /// };
 /// ```
+///
+/// The generic podman initrd downloads its workload files (`compose.yaml` /
+/// `images.tar`) over the file-transmission hypercall during boot, so the boot
+/// loop serves them from the host paths in `BEDROCK_COMPOSE` / `BEDROCK_IMAGES`
+/// (wired up by the `integration-tests` nix app).
 pub fn ready_checkpoint() -> Option<Checkpoint> {
-    let (vmlinux, initramfs) = can_run()?;
+    let env = can_run()?;
     // get_or_init blocks concurrent first-callers until the boot completes,
     // so the guest boots exactly once even under parallel test threads.
-    let cp = READY
-        .get_or_init(|| boot_ready(&vmlinux, &initramfs).expect("boot guest to ready checkpoint"));
+    let cp = READY.get_or_init(|| boot_ready(&env).expect("boot guest to ready checkpoint"));
     Some(cp.clone())
 }
 
-/// Print a skip notice. Visible under `cargo test -- --nocapture`.
+/// Print a skip notice naming exactly what is missing, so a partially
+/// configured run (e.g. kernel + initrd set but the workload files unset) is
+/// obvious rather than looking like a silent pass. Visible under
+/// `cargo test -- --nocapture`.
 pub fn skip(what: &str) {
-    eprintln!(
-        "SKIP {what}: set BEDROCK_VMLINUX + BEDROCK_INITRAMFS and load the \
-         bedrock module to run this test"
-    );
+    let mut missing: Vec<String> = Vec::new();
+    if !Path::new(bedrock_vm::BEDROCK_DEVICE_PATH).exists() {
+        missing.push(format!(
+            "the bedrock module loaded ({} absent)",
+            bedrock_vm::BEDROCK_DEVICE_PATH
+        ));
+    }
+    for var in [
+        "BEDROCK_VMLINUX",
+        "BEDROCK_INITRAMFS",
+        "BEDROCK_COMPOSE",
+        "BEDROCK_IMAGES",
+    ] {
+        if std::env::var(var).is_err() {
+            missing.push(var.to_string());
+        }
+    }
+    eprintln!("SKIP {what}: needs {}", missing.join(", "));
 }
 
-fn boot_ready(vmlinux: &str, initramfs: &str) -> Result<Checkpoint, Box<dyn std::error::Error>> {
+fn boot_ready(env: &GuestEnv) -> Result<Checkpoint, Box<dyn std::error::Error>> {
     let mut vm = VmBuilder::new().memory_mb(MEMORY_MB).build()?;
-    let kernel = std::fs::read(vmlinux)?;
-    let initrd = std::fs::read(initramfs)?;
+    let kernel = std::fs::read(&env.vmlinux)?;
+    let initrd = std::fs::read(&env.initramfs)?;
 
     let (kernel_entry, kernel_end) = {
         let memory = vm.memory_mut()?;
@@ -223,6 +265,12 @@ fn boot_ready(vmlinux: &str, initramfs: &str) -> Result<Checkpoint, Box<dyn std:
         LabOpts {
             sink: capture_sink(),
             rng: RngMode::Seeded(BOOT_RNG_SEED),
+            // The guest downloads these over the file-transmission hypercall
+            // during boot; the boot loop serves them.
+            files: vec![
+                ("compose.yaml".to_string(), env.compose.clone()),
+                ("images.tar".to_string(), env.images.clone()),
+            ],
             ..Default::default()
         },
     )?;

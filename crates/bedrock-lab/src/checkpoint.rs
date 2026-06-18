@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, Weak};
 
+use bedrock_vm::file_xfer::FileServer;
 use bedrock_vm::{
     EventCategories, EventConfig as VmEventConfig, ExitKind, RdrandConfig, Vm, VmError,
 };
@@ -39,6 +40,14 @@ pub struct LabOpts {
     pub sink: Arc<dyn EventSink>,
     /// How guest `RDRAND`/`RDSEED` is served for every branch in this tree.
     pub rng: RngMode,
+    /// Host files exposed to the guest over the file-transmission hypercall
+    /// (`HYPERCALL_FILE_FETCH`), as `(guest_name, host_path)` pairs. The
+    /// generic podman initrd downloads its workload files (`compose.yaml` /
+    /// `images.tar`) by name during boot, so callers booting such an initrd
+    /// must supply them here. Files are only fetched before the ready
+    /// hypercall, so they are served during this constructor's boot loop and
+    /// need not persist into the tree.
+    pub files: Vec<(String, String)>,
 }
 
 impl Default for LabOpts {
@@ -47,6 +56,7 @@ impl Default for LabOpts {
             tsc_frequency: bedrock_vm::DEFAULT_TSC_FREQUENCY,
             sink: Arc::new(Discard),
             rng: RngMode::Inherit,
+            files: Vec::new(),
         }
     }
 }
@@ -128,7 +138,13 @@ impl Checkpoint {
     /// the guest executes `RDRAND`/`RDSEED` before ready.
     pub fn initial_when_ready_with(mut vm: Vm, deadline: VirtTime, opts: LabOpts) -> Result<Self> {
         Self::check_frequency(deadline.frequency(), opts.tsc_frequency)?;
-        let (opts, input_source) = Self::configure_rng(&vm, opts)?;
+        let (mut opts, input_source) = Self::configure_rng(&vm, opts)?;
+        // The guest downloads its workload files (compose.yaml / images.tar)
+        // over `HYPERCALL_FILE_FETCH` during boot, before it issues
+        // `HYPERCALL_READY`. Serve them from the host paths the caller supplied.
+        // Take them out of `opts` (which is moved into the checkpoint below);
+        // they need not persist past boot.
+        let mut file_server = FileServer::new(std::mem::take(&mut opts.files));
         // Capture guest console output as `Serial` event records during boot,
         // the same channel branches use; the root VM gets reserved `BranchId(0)`.
         vm.set_event_config(&VmEventConfig::enabled(EventCategories::SERIAL))
@@ -170,6 +186,15 @@ impl Checkpoint {
                     emit_feedback_buffer_registered(&vm, at, BranchId(0), opts.sink.as_ref())?;
                     continue;
                 }
+                ExitKind::FileFetch => {
+                    file_server.serve(&mut vm).map_err(|source| {
+                        LabError::Vm(VmError::Ioctl {
+                            operation: "FILE_FETCH",
+                            source,
+                        })
+                    })?;
+                    continue;
+                }
                 ExitKind::Continue | ExitKind::EventBufferFull => continue,
                 kind => return Err(LabError::UnexpectedExit { at, kind }),
             }
@@ -188,6 +213,7 @@ impl Checkpoint {
             tsc_frequency,
             sink,
             rng,
+            files,
         } = opts;
 
         let (rdrand_config, input_source) = match rng {
@@ -203,6 +229,7 @@ impl Checkpoint {
                 tsc_frequency,
                 sink,
                 rng: RngMode::Inherit,
+                files,
             },
             input_source,
         ))
@@ -219,6 +246,7 @@ impl Checkpoint {
             tsc_frequency,
             sink,
             rng: _,
+            files: _,
         } = opts;
 
         let lab = LabInner::new(tsc_frequency, sink);

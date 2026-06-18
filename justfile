@@ -60,21 +60,20 @@ remote-clean:
 netconsole:
     rmmod netconsole 2>/dev/null; modprobe netconsole netconsole=@/eno1,@`echo $NETCONSOLE_IP`/
 
-# Build a workload's images.tar via its build.sh, then build the
-# resulting initrd derivation and print its /nix/store path. images.tar
-# is staged transiently (git add -f → nix build → git reset HEAD) so it
-# can't end up in a commit by accident even if the build is interrupted
-# after the stage step — the trap on EXIT still runs.
+# Build a workload's images.tar via its build.sh, then build + print the
+# generic podman initrd. Boot it by handing the workload's files to bedrock-cli:
+#   bedrock-cli -m 5120 -i <initrd> \
+#     --file compose.yaml=workloads/<name>/compose.yaml \
+#     --file images.tar=workloads/<name>/images.tar \
+#     <vmlinux>
 #
 # Usage: just build-workload <name>     # e.g. just build-workload bitcoin
 [group: 'nix']
 build-workload name:
     #!/usr/bin/env bash
     set -euo pipefail
-    trap 'git reset HEAD workloads/{{name}}/images.tar 2>/dev/null || true' EXIT
     ./workloads/{{name}}/build.sh
-    git add -f workloads/{{name}}/images.tar
-    nix build --no-link --print-out-paths .#{{name}}Initrd
+    nix build --no-link --print-out-paths .#podmanInitrd
 
 # Boot NixOS dev VM with nested KVM
 [group: 'nix']
@@ -92,7 +91,7 @@ nix-test-bitcoin-workload:
     nix run .#test-bitcoin-workload
 
 # Run the bedrock-lab integration tests (requires bedrock module loaded and the
-# workload image staged: git add -f workloads/integration-tests/images.tar)
+# workload image built: ./workloads/integration-tests/build.sh)
 [group: 'nix']
 nix-integration-tests:
     nix run .#integration-tests

@@ -137,12 +137,26 @@ tail -n +1 -F /bedrock/assertions.jsonl 2>/dev/null | systemd-cat -t assertions 
 # rendered as `[workload-monitor]`.
 workload-monitor 2>&1 | systemd-cat -t workload-monitor &
 
+# Download the workload files from the host over the file-transmission
+# hypercall. bedrock-file-fetch registers a 1 MB feedback buffer as the
+# transport and pulls each named file in
+# chunks. The host serves them (e.g. `bedrock-cli --file compose.yaml=… --file
+# images.tar=…`, or the lab's `LabOpts.files`). This happens before the workload
+# starts and before the ready hypercall, so it is part of the deterministic
+# boot. Failure is fatal to the workload — without the files there is nothing to
+# run — but we let init continue so the diagnostics reach the journal.
+mkdir -p /workload /images
+bedrock-file-fetch \
+    compose.yaml /workload/compose.yaml \
+    images.tar   /images/images.tar 2>&1 | systemd-cat -t init
+
 # Load all workload images from the single docker-archive tarball.
 # `podman load` reads the embedded manifest to recover each image's
 # original name+tag, so a compose file referencing those names works
-# unchanged.
+# unchanged. The downloaded tarball is left in place at /images/images.tar
+# (it lives in deterministic, CoW-shared tmpfs) so its integrity against the
+# host original stays verifiable.
 podman load -i /images/images.tar 2>&1 | systemd-cat -t init
-rm -f /images/images.tar | systemd-cat -t init
 echo "Loaded images:" | systemd-cat -t init
 podman images 2>&1 | systemd-cat -t init
 

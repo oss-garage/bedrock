@@ -49,6 +49,13 @@ pub enum ExitKind {
     Rdseed,
     /// Event buffer is full - userspace must drain it, then call run() again.
     EventBufferFull,
+    /// Guest requested the next chunk of a host-side file (`HYPERCALL_FILE_FETCH`).
+    ///
+    /// The guest framed a request (offset + name) into its registered
+    /// `bedrock-file-xfer` feedback buffer and wants it filled with the next
+    /// chunk. The host should serve it — see [`crate::file_xfer::FileServer`] —
+    /// and call `run()` again.
+    FileFetch,
     /// Continuable exit - userspace should call run() again.
     ///
     /// Includes: preemption timer, need_resched, MWAIT, MONITOR,
@@ -124,6 +131,7 @@ impl VmExit {
             265 => "VMCALL_IO_RESPONSE",
             266 => "VMCALL_READY",
             267 => "EVENT_BUFFER_FULL",
+            268 => "VMCALL_FILE_FETCH",
             _ => "UNKNOWN",
         }
     }
@@ -142,6 +150,7 @@ impl VmExit {
             57 => ExitKind::Rdrand,
             61 => ExitKind::Rdseed,
             267 => ExitKind::EventBufferFull,
+            268 => ExitKind::FileFetch,
             // Continuable: preemption timer, need_resched, mwait, monitor,
             // I/O instruction, pool exhausted, PEBS scratch-page registration,
             // I/O channel page registration (no userspace action needed —

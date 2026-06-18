@@ -758,6 +758,85 @@ impl Vm {
         self.map_feedback_buffer_at(0)
     }
 
+    /// Map the feedback buffer at `index` into this process's address space
+    /// with **read+write** access, returning a mutable slice over its pages.
+    ///
+    /// Identical to [`map_feedback_buffer_at`](Self::map_feedback_buffer_at)
+    /// except the mapping is `PROT_READ | PROT_WRITE`, so writes land directly
+    /// in the guest's buffer pages. `bedrock_remap_pages` maps with the VMA's
+    /// `vm_page_prot`, so the write bit on the userspace `mmap` is honoured.
+    /// This is what the file-transfer mechanism uses to deliver a file chunk to
+    /// the guest (see [`crate::file_xfer`]).
+    ///
+    /// Once mapped (read-only or read-write), the mapping is tracked the same
+    /// way and freed on drop; calling either mapper twice for the same index is
+    /// an error.
+    pub fn map_feedback_buffer_mut_at(&mut self, index: usize) -> io::Result<&mut [u8]> {
+        if index >= MAX_FEEDBACK_BUFFERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid feedback buffer index: {} (max {})",
+                    index,
+                    MAX_FEEDBACK_BUFFERS - 1
+                ),
+            ));
+        }
+
+        if self.feedback_buffer_ptrs[index].is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("feedback buffer {} is already mapped", index),
+            ));
+        }
+
+        let info = self.get_feedback_buffer_info_at(index)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no feedback buffer registered at index {}", index),
+            )
+        })?;
+
+        let size = info.num_pages as usize * 4096;
+        let offset = self.feedback_buffer_mmap_offset_at(index);
+
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                self.fd.as_raw_fd(),
+                offset,
+            )
+        };
+
+        if ptr == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+
+        let ptr = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+        self.feedback_buffer_ptrs[index] = Some(ptr);
+        self.feedback_buffer_sizes[index] = size;
+
+        Ok(unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), size) })
+    }
+
+    /// Get the feedback buffer at `index` as a mutable slice, if mapped.
+    ///
+    /// Only meaningful when the buffer was mapped with
+    /// [`map_feedback_buffer_mut_at`](Self::map_feedback_buffer_mut_at); a
+    /// read-only mapping is not writable and the kernel will fault on write.
+    pub fn feedback_buffer_mut_at(&mut self, index: usize) -> Option<&mut [u8]> {
+        if index >= MAX_FEEDBACK_BUFFERS {
+            return None;
+        }
+
+        self.feedback_buffer_ptrs[index].map(|ptr| unsafe {
+            slice::from_raw_parts_mut(ptr.as_ptr(), self.feedback_buffer_sizes[index])
+        })
+    }
+
     /// Unmap the feedback buffer at the specified index if mapped.
     ///
     /// This is called automatically when the VM is dropped, but can be called

@@ -8,21 +8,23 @@
 #   guestKernel  Patched 6.18 guest kernel (see nix/guest-kernel.nix). Its `dev`
 #                output is used to build the bedrock-io kernel module out-of-tree
 #                against the exact same configuration the guest boots.
-#   composeYaml  Path (or derivation) for the workload's compose file. Copied to
-#                /workload/compose.yaml and `podman-compose up -d`'d at boot.
-#   imagesTar    Path (or derivation) for a docker-archive tarball containing
-#                every image referenced from composeYaml. Produce it with
-#                `docker save img1 [img2 ...] -o images.tar` (multiple images in
-#                one archive is fine — `podman load` reads the embedded manifest
-#                to recover each one's name+tag). The compose file should use
-#                `pull_policy: never` so podman doesn't try to fetch from a
-#                registry.
 #
-# Anything workload-specific — helper binaries, driver scripts, configs — must
-# be baked into one of the images. The initrd ships only the generic podman /
-# journald / kernel-module infrastructure plus `bedrock-pebs-register`, which it
-# runs at boot to enable precise EPT-friendly PEBS exits.
-{ pkgs, guestKernel, composeYaml, imagesTar }:
+# This initrd is fully generic — it carries no workload. The workload's
+# compose file and image tarball are downloaded at boot over the
+# file-transmission hypercall (HYPERCALL_FILE_FETCH) by `bedrock-file-fetch`,
+# served by the host (e.g. `bedrock-cli --file compose.yaml=… --file
+# images.tar=…`, or via the lab's `LabOpts.files`). The compose file should use
+# `pull_policy: never` so podman doesn't try to fetch from a registry; produce
+# the image tarball with `docker save img1 [img2 ...] -o images.tar` (multiple
+# images in one archive is fine — `podman load` reads the embedded manifest to
+# recover each one's name+tag).
+#
+# Anything else workload-specific — helper binaries, driver scripts, configs —
+# must be baked into one of the images. The initrd ships only the generic podman
+# / journald / kernel-module infrastructure plus `bedrock-pebs-register` (run at
+# boot to enable precise EPT-friendly PEBS exits) and `bedrock-file-fetch` (run
+# at boot to download the workload files).
+{ pkgs, guestKernel }:
 
 let
   bedrockPebsRegister = pkgs.pkgsStatic.stdenv.mkDerivation {
@@ -32,6 +34,17 @@ let
     # pebs-register.c's `#include "libvmcall.h"` resolves.
     buildPhase = "$CC -O2 -static -I${../guest} -o bedrock-pebs-register ${../guest/pebs-register.c}";
     installPhase = "mkdir -p $out/bin && cp bedrock-pebs-register $out/bin/";
+  };
+
+  # Guest-side file downloader. Pulls the workload's compose.yaml / images.tar
+  # from the host at boot over the file-transmission hypercall. Built the same
+  # way as bedrock-pebs-register (static, header-only libvmcall.h on the include
+  # path).
+  bedrockFileFetch = pkgs.pkgsStatic.stdenv.mkDerivation {
+    name = "bedrock-file-fetch";
+    dontUnpack = true;
+    buildPhase = "$CC -O2 -static -I${../guest} -o bedrock-file-fetch ${../guest/file-fetch.c}";
+    installPhase = "mkdir -p $out/bin && cp bedrock-file-fetch $out/bin/";
   };
 
   # Guest kernel module that drives the deterministic I/O channel. Built
@@ -183,6 +196,7 @@ let
     # itself, not the full unit-management surface.
     pkgs.systemd
     bedrockPebsRegister
+    bedrockFileFetch
   ];
 
   # Merged environment — creates a single store path with bin/, sbin/, etc.
@@ -308,6 +322,10 @@ pkgs.stdenv.mkDerivation {
     # concerns — workloads bake them into their own container images.
     ln -sf ${bedrockPebsRegister}/bin/bedrock-pebs-register rootfs/usr/local/bin/bedrock-pebs-register
 
+    # bedrock-file-fetch at /usr/local/bin/ so the init script finds it on PATH.
+    # It downloads the workload's compose.yaml / images.tar from the host at boot.
+    ln -sf ${bedrockFileFetch}/bin/bedrock-file-fetch rootfs/usr/local/bin/bedrock-file-fetch
+
     # workload-monitor: watches podman container/exec lifecycle events and
     # records exit-code assertions to /bedrock/assertions.jsonl. Lives on the
     # guest rootfs (not inside any container image) so it observes every
@@ -359,10 +377,9 @@ pkgs.stdenv.mkDerivation {
     # there are no upstream nameservers.
     RESOLV
 
-    # Workload: one docker-archive tarball + one compose file. `podman load`
-    # recovers image names from the manifest, so the file name here is opaque.
-    cp ${imagesTar} rootfs/images/images.tar
-    cp ${composeYaml} rootfs/workload/compose.yaml
+    # Workload files (compose.yaml / images.tar) are downloaded from the host at
+    # boot by the init script via bedrock-file-fetch. The /images and /workload
+    # directories are pre-created above so the downloads have somewhere to land.
     cp ${initScript} rootfs/init
     chmod +x rootfs/init
   '';

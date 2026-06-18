@@ -211,6 +211,13 @@ pub enum ExitReason {
     /// pending record on the next RUN. Guest state is unchanged — this is a pure
     /// host-side drain round-trip.
     EventBufferFull = 267,
+    /// VMCALL hypercall: guest requested the next chunk of a host-side file.
+    /// Guest issued VMCALL with RAX=10 (`HYPERCALL_FILE_FETCH`). The host fills
+    /// the registered `bedrock-file-xfer` feedback buffer with the requested
+    /// chunk (request/response framed in the buffer) and resumes the VM. This
+    /// is how the guest downloads the workload's `compose.yaml` / `images.tar`
+    /// at boot.
+    VmcallFileFetch = 268,
 }
 
 /// Error when converting from raw exit reason value.
