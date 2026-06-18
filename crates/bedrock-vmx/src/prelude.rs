@@ -181,16 +181,16 @@ pub use crate::cow::CowPageMap;
 #[cfg(not(feature = "cargo"))]
 pub use super::vm_state::{
     box_vm_state, AllExitStats, EnqueueResult, ExitStats, ExitTrigger, FeedbackBufferInfo,
-    IoChannelState, PendingIoAction, SerialConsoleState, SyscallMsrs, VmState, VmStateBox,
-    VmStateError, DEFAULT_TSC_FREQUENCY, FEEDBACK_BUFFER_ID_MAX_LEN, FEEDBACK_BUFFER_MAX_PAGES,
-    IO_CHANNEL_BUF_SIZE, MAX_FEEDBACK_BUFFERS, PENDING_IO_QUEUE_CAP, SERIAL_CONSOLE_PAGE_SIZE,
+    FeedbackBuffers, IoChannelState, PendingIoAction, SerialConsoleState, SyscallMsrs, VmState,
+    VmStateBox, VmStateError, DEFAULT_TSC_FREQUENCY, FEEDBACK_BUFFER_ID_MAX_LEN,
+    FEEDBACK_BUFFER_MAX_PAGES, IO_CHANNEL_BUF_SIZE, PENDING_IO_QUEUE_CAP, SERIAL_CONSOLE_PAGE_SIZE,
 };
 #[cfg(feature = "cargo")]
 pub use crate::vm_state::{
     box_vm_state, AllExitStats, EnqueueResult, ExitStats, ExitTrigger, FeedbackBufferInfo,
-    IoChannelState, PendingIoAction, SerialConsoleState, SyscallMsrs, VmState, VmStateBox,
-    VmStateError, DEFAULT_TSC_FREQUENCY, FEEDBACK_BUFFER_ID_MAX_LEN, FEEDBACK_BUFFER_MAX_PAGES,
-    IO_CHANNEL_BUF_SIZE, MAX_FEEDBACK_BUFFERS, PENDING_IO_QUEUE_CAP, SERIAL_CONSOLE_PAGE_SIZE,
+    FeedbackBuffers, IoChannelState, PendingIoAction, SerialConsoleState, SyscallMsrs, VmState,
+    VmStateBox, VmStateError, DEFAULT_TSC_FREQUENCY, FEEDBACK_BUFFER_ID_MAX_LEN,
+    FEEDBACK_BUFFER_MAX_PAGES, IO_CHANNEL_BUF_SIZE, PENDING_IO_QUEUE_CAP, SERIAL_CONSOLE_PAGE_SIZE,
 };
 
 // =============================================================================
@@ -212,11 +212,11 @@ pub use crate::timing::rdtsc;
 // =============================================================================
 #[cfg(not(feature = "cargo"))]
 pub use super::compat::{
-    heap_box, heap_vec_push, heap_vec_remove_front, heap_vec_with_capacity, AllocError, HeapBox,
-    HeapVec, VmallocBox,
+    heap_box, heap_box_copy_from, heap_box_try, heap_vec_push, heap_vec_remove_front,
+    heap_vec_with_capacity, AllocError, HeapBox, HeapVec, VmallocBox,
 };
 #[cfg(feature = "cargo")]
 pub use crate::compat::{
-    heap_box, heap_vec_push, heap_vec_remove_front, heap_vec_with_capacity, AllocError, HeapBox,
-    HeapVec, VmallocBox,
+    heap_box, heap_box_copy_from, heap_box_try, heap_vec_push, heap_vec_remove_front,
+    heap_vec_with_capacity, AllocError, HeapBox, HeapVec, VmallocBox,
 };

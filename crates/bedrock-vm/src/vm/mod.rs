@@ -11,7 +11,6 @@ pub use config::{EventConfig, ExitTrigger, SingleStepConfig, EXIT_REASON_CHECKPO
 pub use exit::{ExitKind, VmExit};
 pub use ioctl::{
     FeedbackBufferInfo, FeedbackBufferInfoRequest, IoActionPayload, IO_CHANNEL_BUF_SIZE,
-    MAX_FEEDBACK_BUFFERS,
 };
 pub use stats::{ExitStatEntry, ExitStats, ExitStatsReport, IoctlStats};
 
@@ -39,13 +38,16 @@ pub use bedrock_vmx::DEFAULT_TSC_FREQUENCY;
 /// Size of the unified event buffer (1 MB), mmap'd to userspace.
 pub use crate::events::EVENT_BUFFER_SIZE;
 
-/// 1 MB per feedback-buffer mmap slot (must match the kernel layout).
-const FEEDBACK_BUFFER_SLOT_SIZE: usize = 1024 * 1024;
+/// 1 MB per feedback-buffer mmap slot. Sourced from `bedrock_vmx` so the
+/// userspace mapper and the kernel module's mmap handlers never drift. A
+/// single buffer is capped at this size; the *number* of buffers is unbounded.
+const FEEDBACK_BUFFER_SLOT_SIZE: usize = bedrock_vmx::FEEDBACK_BUFFER_SLOT_SIZE as usize;
 
-/// Bytes of mmap address space reserved for the feedback-buffer region,
-/// after which the event buffer is placed. Keeping the event buffer past the
-/// feedback slots means enabling the stream never shifts any existing offset.
-const FEEDBACK_REGION_SIZE: usize = MAX_FEEDBACK_BUFFERS * FEEDBACK_BUFFER_SLOT_SIZE;
+/// Fixed mmap file offset of the unified event buffer. Because the
+/// feedback-buffer region is unbounded, the event buffer lives at this fixed
+/// sentinel offset (above guest memory and any feedback region) rather than
+/// just past a fixed-size region. Shared with the kernel module via `bedrock_vmx`.
+const EVENT_BUFFER_MMAP_OFFSET: usize = bedrock_vmx::EVENT_BUFFER_MMAP_OFFSET as usize;
 
 /// A userspace handle to a bedrock VM.
 ///
@@ -72,10 +74,13 @@ pub struct Vm {
     event_ptr: Option<NonNull<u8>>,
     /// Offset for event buffer mmap (placed after the feedback-buffer region).
     event_mmap_offset: libc::off_t,
-    /// Mapped feedback buffer pointers (None if not mapped).
-    feedback_buffer_ptrs: [Option<NonNull<u8>>; MAX_FEEDBACK_BUFFERS],
-    /// Sizes of mapped feedback buffers (0 if not mapped).
-    feedback_buffer_sizes: [usize; MAX_FEEDBACK_BUFFERS],
+    /// Mapped feedback buffer pointers, indexed by slot (None if that slot is
+    /// not mapped). Grows on demand as buffers are mapped — the number of
+    /// feedback buffers is unbounded.
+    feedback_buffer_ptrs: Vec<Option<NonNull<u8>>>,
+    /// Sizes of mapped feedback buffers, indexed by slot (0 if not mapped).
+    /// Kept the same length as `feedback_buffer_ptrs`.
+    feedback_buffer_sizes: Vec<usize>,
     /// Userspace ioctl timing statistics.
     ioctl_stats: Cell<IoctlStats>,
     /// Whether this is a forked VM.
@@ -99,7 +104,7 @@ impl Drop for Vm {
                 libc::munmap(event_ptr.as_ptr() as *mut libc::c_void, EVENT_BUFFER_SIZE);
             }
             // Unmap feedback buffers if mapped
-            for i in 0..MAX_FEEDBACK_BUFFERS {
+            for i in 0..self.feedback_buffer_ptrs.len() {
                 if let Some(fb_ptr) = self.feedback_buffer_ptrs[i] {
                     libc::munmap(
                         fb_ptr.as_ptr() as *mut libc::c_void,
@@ -205,10 +210,12 @@ impl Vm {
 
         let memory_ptr = Some(unsafe { NonNull::new_unchecked(ptr as *mut u8) });
 
-        // Root mmap layout: mem | feedback[0..16] | event. Guest serial output
-        // flows through the event buffer as `Serial` records, so there is no
-        // dedicated serial/TSC page to map.
-        let event_mmap_offset = (memory_size + FEEDBACK_REGION_SIZE) as libc::off_t;
+        // Root mmap layout: mem | feedback[0..] (unbounded) | event-at-sentinel.
+        // The event buffer sits at a fixed sentinel offset (above guest memory
+        // and the unbounded feedback region). Guest serial output flows through
+        // the event buffer as `Serial` records, so there is no dedicated
+        // serial/TSC page to map.
+        let event_mmap_offset = EVENT_BUFFER_MMAP_OFFSET as libc::off_t;
 
         Ok(Self {
             fd,
@@ -216,8 +223,8 @@ impl Vm {
             memory_size,
             event_ptr: None,
             event_mmap_offset,
-            feedback_buffer_ptrs: [None; MAX_FEEDBACK_BUFFERS],
-            feedback_buffer_sizes: [0; MAX_FEEDBACK_BUFFERS],
+            feedback_buffer_ptrs: Vec::new(),
+            feedback_buffer_sizes: Vec::new(),
             ioctl_stats: Cell::new(IoctlStats::default()),
             forked: false,
         })
@@ -249,10 +256,12 @@ impl Vm {
 
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
-        // Forked mmap layout (no guest-memory prefix): feedback[0..16] | event.
-        // Guest serial output flows through the event buffer as `Serial`
-        // records, so there is no dedicated serial/TSC page to map.
-        let event_mmap_offset = FEEDBACK_REGION_SIZE as libc::off_t;
+        // Forked mmap layout (no guest-memory prefix): feedback[0..] (unbounded)
+        // | event-at-sentinel. The event buffer sits at a fixed sentinel offset
+        // above the unbounded feedback region. Guest serial output flows through
+        // the event buffer as `Serial` records, so there is no dedicated
+        // serial/TSC page to map.
+        let event_mmap_offset = EVENT_BUFFER_MMAP_OFFSET as libc::off_t;
 
         Ok(Self {
             fd,
@@ -260,8 +269,8 @@ impl Vm {
             memory_size: 0,
             event_ptr: None,
             event_mmap_offset,
-            feedback_buffer_ptrs: [None; MAX_FEEDBACK_BUFFERS],
-            feedback_buffer_sizes: [0; MAX_FEEDBACK_BUFFERS],
+            feedback_buffer_ptrs: Vec::new(),
+            feedback_buffer_sizes: Vec::new(),
             ioctl_stats: Cell::new(IoctlStats::default()),
             forked: true,
         })
@@ -620,22 +629,15 @@ impl Vm {
 
     /// Get feedback buffer registration info for a specific index.
     ///
-    /// Returns `None` if no feedback buffer has been registered at the given index.
+    /// Returns `None` if no feedback buffer has been registered at the given
+    /// index. Since registration is append-only and contiguous, querying
+    /// indices `0, 1, 2, …` until the first `None` enumerates exactly the
+    /// registered buffers (the kernel reports any unregistered/out-of-range
+    /// index as not-registered rather than an error).
     pub fn get_feedback_buffer_info_at(
         &self,
         index: usize,
     ) -> io::Result<Option<FeedbackBufferInfo>> {
-        if index >= MAX_FEEDBACK_BUFFERS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid feedback buffer index: {} (max {})",
-                    index,
-                    MAX_FEEDBACK_BUFFERS - 1
-                ),
-            ));
-        }
-
         // Allocate space for the full response. The kernel reads the request from
         // the first 8 bytes and writes the larger response struct to the same address.
         let mut info = std::mem::MaybeUninit::<FeedbackBufferInfo>::uninit();
@@ -688,31 +690,20 @@ impl Vm {
     /// The guest must have registered a feedback buffer at this index via the
     /// HYPERCALL_REGISTER_FEEDBACK_BUFFER hypercall before calling this.
     ///
-    /// For forked VMs, the feedback buffer pages are pre-COW'd (copied from parent)
-    /// either at fork time (if registered before fork) or at registration time
-    /// (if registered after fork). This ensures the mapped pages are stable and
-    /// all guest writes are visible through the mapping without needing to remap.
+    /// For forked VMs, the kernel copies-on-write every page of the buffer into
+    /// this VM at map time, so the mapped frames are the ones the guest writes
+    /// to. The mapping therefore stays coherent across subsequent runs: you can
+    /// map once, keep running the guest, and re-read the latest contents
+    /// without remapping.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Index is out of range (>= 16)
     /// - No feedback buffer has been registered at this index
     /// - The buffer is already mapped
     /// - The mmap syscall fails
     pub fn map_feedback_buffer_at(&mut self, index: usize) -> io::Result<&[u8]> {
-        if index >= MAX_FEEDBACK_BUFFERS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid feedback buffer index: {} (max {})",
-                    index,
-                    MAX_FEEDBACK_BUFFERS - 1
-                ),
-            ));
-        }
-
-        if self.feedback_buffer_ptrs[index].is_some() {
+        if self.feedback_buffer_at(index).is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("feedback buffer {} is already mapped", index),
@@ -745,6 +736,7 @@ impl Vm {
         }
 
         let ptr = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+        self.ensure_feedback_slot(index);
         self.feedback_buffer_ptrs[index] = Some(ptr);
         self.feedback_buffer_sizes[index] = size;
 
@@ -772,18 +764,7 @@ impl Vm {
     /// way and freed on drop; calling either mapper twice for the same index is
     /// an error.
     pub fn map_feedback_buffer_mut_at(&mut self, index: usize) -> io::Result<&mut [u8]> {
-        if index >= MAX_FEEDBACK_BUFFERS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid feedback buffer index: {} (max {})",
-                    index,
-                    MAX_FEEDBACK_BUFFERS - 1
-                ),
-            ));
-        }
-
-        if self.feedback_buffer_ptrs[index].is_some() {
+        if self.feedback_buffer_at(index).is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("feedback buffer {} is already mapped", index),
@@ -816,6 +797,7 @@ impl Vm {
         }
 
         let ptr = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+        self.ensure_feedback_slot(index);
         self.feedback_buffer_ptrs[index] = Some(ptr);
         self.feedback_buffer_sizes[index] = size;
 
@@ -828,7 +810,7 @@ impl Vm {
     /// [`map_feedback_buffer_mut_at`](Self::map_feedback_buffer_mut_at); a
     /// read-only mapping is not writable and the kernel will fault on write.
     pub fn feedback_buffer_mut_at(&mut self, index: usize) -> Option<&mut [u8]> {
-        if index >= MAX_FEEDBACK_BUFFERS {
+        if index >= self.feedback_buffer_ptrs.len() {
             return None;
         }
 
@@ -842,7 +824,7 @@ impl Vm {
     /// This is called automatically when the VM is dropped, but can be called
     /// manually to free the mapping early.
     pub fn unmap_feedback_buffer_at(&mut self, index: usize) {
-        if index >= MAX_FEEDBACK_BUFFERS {
+        if index >= self.feedback_buffer_ptrs.len() {
             return;
         }
 
@@ -866,7 +848,7 @@ impl Vm {
 
     /// Get the feedback buffer at the specified index as a slice, if mapped.
     pub fn feedback_buffer_at(&self, index: usize) -> Option<&[u8]> {
-        if index >= MAX_FEEDBACK_BUFFERS {
+        if index >= self.feedback_buffer_ptrs.len() {
             return None;
         }
 
@@ -890,30 +872,44 @@ impl Vm {
     /// buffers (e.g. coverage merge) typically iterate the returned slots
     /// and OR their bytes together.
     ///
-    /// Issues one `get_feedback_buffer_info_at` ioctl per slot up to
-    /// [`MAX_FEEDBACK_BUFFERS`]; cheap but not free, so cache the result
-    /// across runs if the registration set is stable.
+    /// Issues one `get_feedback_buffer_info_at` ioctl per registered slot,
+    /// stopping at the first unregistered index (registration is append-only
+    /// and contiguous). Cheap but not free, so cache the result across runs if
+    /// the registration set is stable.
     pub fn feedback_buffer_slots_for_id(&self, id: &[u8]) -> io::Result<Vec<usize>> {
         let mut hits = Vec::new();
-        for slot in 0..MAX_FEEDBACK_BUFFERS {
-            if let Some(info) = self.get_feedback_buffer_info_at(slot)? {
-                if info.id_bytes() == id {
-                    hits.push(slot);
-                }
+        let mut slot = 0;
+        while let Some(info) = self.get_feedback_buffer_info_at(slot)? {
+            if info.id_bytes() == id {
+                hits.push(slot);
             }
+            slot += 1;
         }
         Ok(hits)
     }
 
-    /// Compute the mmap offset for the feedback buffer at the specified index.
-    fn feedback_buffer_mmap_offset_at(&self, index: usize) -> libc::off_t {
-        const FEEDBACK_BUFFER_SLOT_SIZE: usize = 1024 * 1024; // 1MB per slot
+    /// Grow the per-slot mapping bookkeeping vectors so `index` is in range,
+    /// padding any new slots with "not mapped" entries. The two vectors are
+    /// always kept the same length.
+    fn ensure_feedback_slot(&mut self, index: usize) {
+        if self.feedback_buffer_ptrs.len() <= index {
+            self.feedback_buffer_ptrs.resize(index + 1, None);
+            self.feedback_buffer_sizes.resize(index + 1, 0);
+        }
+    }
 
+    /// Compute the mmap offset for the feedback buffer at the specified index.
+    ///
+    /// Each buffer is capped at one [`FEEDBACK_BUFFER_SLOT_SIZE`] slot, so slot
+    /// `index` lives at `base + index * FEEDBACK_BUFFER_SLOT_SIZE`. The number
+    /// of slots is unbounded; the event buffer lives at a fixed sentinel offset
+    /// ([`EVENT_BUFFER_MMAP_OFFSET`]) above the whole region.
+    fn feedback_buffer_mmap_offset_at(&self, index: usize) -> libc::off_t {
         let base_offset = if self.forked {
-            // Forked layout: feedback_base(0) | event
+            // Forked layout: feedback_base(0) | event-at-sentinel
             0
         } else {
-            // Root layout: mem | feedback_base(mem_size) | event
+            // Root layout: mem | feedback_base(mem_size) | event-at-sentinel
             self.memory_size
         };
 

@@ -104,7 +104,8 @@ pub(crate) struct BedrockIoActionPayload {
 /// Userspace passes this structure to specify which feedback buffer index to query.
 #[repr(C)]
 pub(crate) struct BedrockFeedbackBufferInfoRequest {
-    /// Buffer index to query (0-15).
+    /// 0-based buffer index to query. The count is unbounded; an unregistered
+    /// or out-of-range index is reported back with `registered = 0`.
     pub index: u32,
     /// Reserved for alignment.
     pub _reserved: u32,
@@ -131,7 +132,7 @@ pub(crate) struct BedrockFeedbackBufferInfo {
     pub num_pages: u64,
     /// Whether a feedback buffer is registered (0 = no, 1 = yes).
     pub registered: u32,
-    /// Slot index (0..MAX_FEEDBACK_BUFFERS).
+    /// 0-based slot index (the buffer's position in the unbounded list).
     pub index: u32,
     /// Length of the identifier in `id`, in bytes (0 if `registered == 0`).
     pub id_len: u32,

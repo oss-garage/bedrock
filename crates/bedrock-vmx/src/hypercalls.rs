@@ -16,15 +16,18 @@ pub const HYPERCALL_SNAPSHOT: u64 = 1;
 ///
 /// Inputs:
 /// - RBX: Guest virtual address of buffer
-/// - RCX: Size of buffer in bytes
-/// - RDX: Buffer index (0-15)
+/// - RCX: Size of buffer in bytes (capped at 1MB / 256 pages)
+/// - RDX: Guest virtual address of the identifier bytes
+/// - RSI: Identifier length in bytes
 ///
 /// Outputs:
-/// - RAX: 0 on success, -1 (0xFFFFFFFFFFFFFFFF) on failure
+/// - RAX: the assigned slot index on success, or one of the `FB_ERR_*`
+///   sentinels (near `u64::MAX`) on failure.
 ///
-/// The buffer's GVA is translated to GPAs and stored in VmState
-/// at the specified index for later mapping by host userspace.
-/// Up to 16 feedback buffers can be registered per VM.
+/// The buffer's GVA is translated to GPAs and appended to a heap-growable
+/// list in VmState; the returned slot index (its position in that list) is
+/// used by host userspace to map it. The number of feedback buffers a VM may
+/// register is unbounded — each registration appends a new slot.
 pub const HYPERCALL_REGISTER_FEEDBACK_BUFFER: u64 = 2;
 
 /// Register the guest's 4KB shared I/O channel page.

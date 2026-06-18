@@ -12,11 +12,14 @@ RUN apk add --no-cache gcc musl-dev
 COPY libvmcall.h /src/libvmcall.h
 COPY ready.c /src/ready.c
 COPY test_feedback_buffers.c /src/test_feedback_buffers.c
+COPY test_feedback_buffer_counter.c /src/test_feedback_buffer_counter.c
 RUN gcc -O2 -static -o /bedrock-ready /src/ready.c
 RUN gcc -O2 -static -o /test_feedback_buffers /src/test_feedback_buffers.c
+RUN gcc -O2 -static -o /test_feedback_buffer_counter /src/test_feedback_buffer_counter.c
 
 FROM alpine:3.20
 COPY --from=build /bedrock-ready /usr/local/bin/bedrock-ready
 # Lab-driven test drivers live under /opt/bedrock/drivers.
 COPY --from=build /test_feedback_buffers /opt/bedrock/drivers/test_feedback_buffers
+COPY --from=build /test_feedback_buffer_counter /opt/bedrock/drivers/test_feedback_buffer_counter
 ENTRYPOINT ["/usr/local/bin/bedrock-ready"]

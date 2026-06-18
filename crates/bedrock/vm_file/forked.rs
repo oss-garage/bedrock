@@ -16,8 +16,10 @@ use super::super::c_helpers::{
     bedrock_kva_to_phys, bedrock_remap_pages, bedrock_remap_vmalloc_range, bedrock_vma_end,
     bedrock_vma_pgoff, bedrock_vma_start,
 };
+use super::super::factory::KernelFrameAllocator;
+use super::super::machine::MACHINE;
 use super::super::page::{EventBuffer, PagePool, EVENT_BUFFER_SIZE};
-use super::super::vmx::traits::Page;
+use super::super::vmx::traits::{Machine, Page, VmContext};
 use super::super::vmx::{CowPageMap, ForkableVm, ParentVm, VmState};
 use super::super::HANDLER;
 use super::core::BedrockForkedVmFile;
@@ -226,12 +228,13 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
     // Guest serial output flows through the event buffer as `Serial` records,
     // so there is no dedicated serial/TSC page in the layout.
     let feedback_buffer_base_offset: u64 = 0;
-    const FEEDBACK_BUFFER_SLOT_SIZE: u64 = 1024 * 1024; // 1MB per slot
-                                                        // Event buffer sits just past the feedback-buffer region (see root.rs).
-                                                        // Checked before the feedback catch-all since its offset is also
-                                                        // `>= feedback_buffer_base_offset`.
-    let event_buffer_offset: u64 = feedback_buffer_base_offset
-        + super::super::vmx::MAX_FEEDBACK_BUFFERS as u64 * FEEDBACK_BUFFER_SLOT_SIZE;
+    // 1MB per feedback slot; sourced from vmx so userspace and kernel never
+    // drift. Per-buffer size is capped but the number of buffers is unbounded.
+    let feedback_buffer_slot_size: u64 = super::super::vmx::FEEDBACK_BUFFER_SLOT_SIZE;
+    // Event buffer sits at a fixed sentinel offset above the (unbounded)
+    // feedback-buffer region (see root.rs). Checked before the feedback
+    // catch-all since its offset is also `>= feedback_buffer_base_offset`.
+    let event_buffer_offset: u64 = super::super::vmx::EVENT_BUFFER_MMAP_OFFSET;
 
     if offset_bytes == event_buffer_offset {
         // Event buffer mapping
@@ -266,22 +269,32 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
         ret
     } else if offset_bytes >= feedback_buffer_base_offset {
         let relative_offset = offset_bytes - feedback_buffer_base_offset;
-        let buffer_index = (relative_offset / FEEDBACK_BUFFER_SLOT_SIZE) as usize;
-
-        // Validate buffer index
-        if buffer_index >= super::super::vmx::MAX_FEEDBACK_BUFFERS {
-            log_err!("mmap: invalid feedback buffer index {}\n", buffer_index);
-            return -(bindings::EINVAL as i32);
-        }
+        let buffer_index = (relative_offset / feedback_buffer_slot_size) as usize;
 
         // Check alignment within slot
-        if !relative_offset.is_multiple_of(FEEDBACK_BUFFER_SLOT_SIZE) {
+        if !relative_offset.is_multiple_of(feedback_buffer_slot_size) {
             log_err!("mmap: feedback buffer offset not aligned to slot boundary\n");
             return -(bindings::EINVAL as i32);
         }
 
-        // Feedback buffer mapping
-        let feedback_buffer = match &vm_file.vm.state.feedback_buffers[buffer_index] {
+        // COW this buffer's pages into the VM now, so the frames we map are the
+        // ones the guest will write to. Without this, a forked child mapped
+        // before it writes the buffer would later COW each written page to a
+        // new frame, leaving this mapping stale ("map once, keep running,
+        // re-read"). A no-op for pages already COW'd and for an unregistered /
+        // out-of-range index (handled by the `.get()` below). mmap runs in
+        // sleepable context, so direct GFP_KERNEL allocation (pool = None) is
+        // fine.
+        {
+            let mut allocator = KernelFrameAllocator::new(MACHINE.kernel());
+            vm_file
+                .vm
+                .cow_feedback_buffer_for_mapping(buffer_index, &mut allocator);
+        }
+
+        // Feedback buffer mapping. An unregistered or out-of-range index has no
+        // entry in the (unbounded) buffer vector.
+        let feedback_buffer = match vm_file.vm.state.feedback_buffers.get(buffer_index) {
             Some(fb) => fb,
             None => {
                 log_err!("mmap: feedback buffer {} not registered\n", buffer_index);

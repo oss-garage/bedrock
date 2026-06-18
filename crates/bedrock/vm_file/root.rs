@@ -223,14 +223,14 @@ unsafe extern "C" fn bedrock_vm_mmap(
     // so there is no dedicated serial/TSC page in the layout.
     let guest_mem_size = memory.size();
     let feedback_buffer_base_offset = guest_mem_size;
-    const FEEDBACK_BUFFER_SLOT_SIZE: usize = 1024 * 1024; // 1MB per slot
-                                                          // The event buffer sits just past the feedback-buffer region (i.e. at the
-                                                          // slot the index `MAX_FEEDBACK_BUFFERS` would occupy). Placing it here means
-                                                          // enabling the event stream never shifts any existing buffer offset. It is
-                                                          // checked *before* the feedback catch-all below because its offset is also
-                                                          // `>= feedback_buffer_base_offset`.
-    let event_buffer_offset = feedback_buffer_base_offset
-        + super::super::vmx::MAX_FEEDBACK_BUFFERS * FEEDBACK_BUFFER_SLOT_SIZE;
+    // 1MB per feedback slot; sourced from vmx so userspace and kernel never
+    // drift. The per-buffer size is capped but the *number* of buffers is
+    // unbounded.
+    let feedback_buffer_slot_size = super::super::vmx::FEEDBACK_BUFFER_SLOT_SIZE as usize;
+    // The event buffer sits at a fixed sentinel offset above the (unbounded)
+    // feedback-buffer region. It is checked *before* the feedback catch-all
+    // below because its offset is also `>= feedback_buffer_base_offset`.
+    let event_buffer_offset = super::super::vmx::EVENT_BUFFER_MMAP_OFFSET as usize;
 
     if offset_bytes as usize == event_buffer_offset {
         // Event buffer mapping
@@ -265,22 +265,17 @@ unsafe extern "C" fn bedrock_vm_mmap(
         ret
     } else if offset_bytes as usize >= feedback_buffer_base_offset {
         let relative_offset = offset_bytes as usize - feedback_buffer_base_offset;
-        let buffer_index = relative_offset / FEEDBACK_BUFFER_SLOT_SIZE;
-
-        // Validate buffer index
-        if buffer_index >= super::super::vmx::MAX_FEEDBACK_BUFFERS {
-            log_err!("mmap: invalid feedback buffer index {}\n", buffer_index);
-            return -(bindings::EINVAL as i32);
-        }
+        let buffer_index = relative_offset / feedback_buffer_slot_size;
 
         // Check alignment within slot
-        if !relative_offset.is_multiple_of(FEEDBACK_BUFFER_SLOT_SIZE) {
+        if !relative_offset.is_multiple_of(feedback_buffer_slot_size) {
             log_err!("mmap: feedback buffer offset not aligned to slot boundary\n");
             return -(bindings::EINVAL as i32);
         }
 
-        // Feedback buffer mapping
-        let feedback_buffer = match &vm_file.vm.state.feedback_buffers[buffer_index] {
+        // Feedback buffer mapping. An unregistered or out-of-range index has no
+        // entry in the (unbounded) buffer vector.
+        let feedback_buffer = match vm_file.vm.state.feedback_buffers.get(buffer_index) {
             Some(fb) => fb,
             None => {
                 log_err!("mmap: feedback buffer {} not registered\n", buffer_index);

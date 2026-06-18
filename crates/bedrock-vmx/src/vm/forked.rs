@@ -217,9 +217,11 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
             children_count: AtomicUsize::new(0),
         };
 
-        // Pre-COW feedback buffer pages if registered (for stable userspace mapping).
-        // This handles the case where feedback buffers were registered before fork.
-        forked_vm.pre_cow_feedback_buffers(allocator);
+        // Feedback buffers need no special handling at fork: their pages are
+        // copied-on-write lazily through the normal EPT write-fault path
+        // (`handle_cow_fault`) when the guest writes them. When userspace maps
+        // a buffer, `cow_feedback_buffer_for_mapping` COWs its pages so the
+        // mapping stays coherent with subsequent guest writes.
 
         // Pre-COW the I/O channel shared page if registered. Without this
         // any HYPERCALL_IO_GET_REQUEST that fires on the fork would hit
@@ -483,57 +485,46 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         true
     }
 
-    fn pre_cow_feedback_buffers<A: CowAllocator<Self::CowPage>>(&mut self, allocator: &mut A) {
-        // Iterate over all registered feedback buffers
-        for idx in 0..MAX_FEEDBACK_BUFFERS {
-            self.pre_cow_feedback_buffer_at(idx, allocator);
-        }
-    }
-
-    fn pre_cow_feedback_buffer_at<A: CowAllocator<Self::CowPage>>(
+    fn cow_feedback_buffer_for_mapping<A: CowAllocator<Self::CowPage>>(
         &mut self,
         index: usize,
         allocator: &mut A,
     ) {
-        if index >= MAX_FEEDBACK_BUFFERS {
-            return;
-        }
-
-        let feedback_buffer = match &self.state.feedback_buffers[index] {
-            Some(fb) => *fb,
+        let feedback_buffer = match self.state.feedback_buffers.get(index) {
+            Some(fb) => **fb,
             None => return,
         };
 
         for i in 0..feedback_buffer.num_pages {
             let page_gpa = GuestPhysAddr::new(feedback_buffer.gpas[i]);
 
-            // Skip if already COW'd
+            // Skip pages already COW'd in this VM: re-copying would clobber a
+            // guest write that happened before the mapping.
             if self.cow_pages.contains(page_gpa) {
                 continue;
             }
 
-            // Allocate a new page for COW
+            // Allocate a child-owned page for COW.
             let new_page = match allocator.allocate_cow_page() {
                 Ok(page) => page,
                 Err(_) => {
                     log_err!(
-                        "pre_cow_feedback_buffer_at: failed to allocate page for GPA {:#x}\n",
+                        "cow_feedback_buffer_for_mapping: failed to allocate page for GPA {:#x}\n",
                         page_gpa.as_u64()
                     );
                     continue;
                 }
             };
 
-            // Get virtual address for copying
             let new_page_virt = new_page.virtual_address().as_u64() as *mut u8;
             let new_page_phys = new_page.physical_address();
 
-            // Copy content from parent
+            // Copy current contents from the parent chain.
             let parent_page = match self.parent_read_page(page_gpa) {
                 Some(ptr) => ptr,
                 None => {
                     log_err!(
-                        "pre_cow_feedback_buffer_at: GPA {:#x} out of parent memory range\n",
+                        "cow_feedback_buffer_for_mapping: GPA {:#x} out of parent memory range\n",
                         page_gpa.as_u64()
                     );
                     continue;
@@ -546,13 +537,14 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                 core::ptr::copy_nonoverlapping(parent_page, new_page_virt, PAGE_SIZE);
             }
 
-            // Insert into COW page map
             if self.cow_pages.insert(page_gpa, new_page).is_err() {
-                log_err!("pre_cow_feedback_buffer_at: failed to insert page into COW map\n");
+                log_err!("cow_feedback_buffer_for_mapping: failed to insert page into COW map\n");
                 continue;
             }
 
-            // Remap EPT entry to point to the new page with RWX permissions
+            // Remap the EPT entry to the new page with RWX permissions, so the
+            // guest writes directly to this (now mapped) frame with no further
+            // fault or re-COW.
             if let Err(_e) = self.state.ept.remap_4k(
                 allocator,
                 page_gpa,
@@ -561,7 +553,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                 EptMemoryType::WriteBack,
             ) {
                 log_err!(
-                    "pre_cow_feedback_buffer_at: failed to remap EPT for GPA {:#x}\n",
+                    "cow_feedback_buffer_for_mapping: failed to remap EPT for GPA {:#x}\n",
                     page_gpa.as_u64()
                 );
                 continue;
@@ -572,7 +564,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             let _ = <<V::M as Machine>::V as Vmx>::invept_single_context(self.state.ept.eptp());
 
             log_debug!(
-                "pre_cow_feedback_buffer_at: pre-COW'd buffer {} page at GPA {:#x} -> HPA {:#x}\n",
+                "cow_feedback_buffer_for_mapping: COW'd buffer {} page at GPA {:#x} -> HPA {:#x}\n",
                 index,
                 page_gpa.as_u64(),
                 new_page_phys.as_u64()

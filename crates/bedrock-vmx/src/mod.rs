@@ -39,8 +39,8 @@ pub use traits::{
 pub use cow::CowPageMap;
 pub use vm::{ForkableVm, ForkedVm, ParentVm, RootVm};
 pub use vm_state::{
-    EnqueueResult, ExitTrigger, FeedbackBufferInfo, PendingIoAction, VmState,
-    FEEDBACK_BUFFER_ID_MAX_LEN, MAX_FEEDBACK_BUFFERS,
+    EnqueueResult, ExitTrigger, FeedbackBufferInfo, FeedbackBuffers, PendingIoAction, VmState,
+    EVENT_BUFFER_MMAP_OFFSET, FEEDBACK_BUFFER_ID_MAX_LEN, FEEDBACK_BUFFER_SLOT_SIZE,
 };
 
 // Heap helpers used by the kernel module ioctl handlers.

@@ -78,14 +78,12 @@ pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u64 =
 // _IOW('B', 1, u64) - takes parent VM ID as argument
 pub(crate) const BEDROCK_CREATE_FORKED_VM: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 1, size_of::<u64>());
 
-/// Maximum number of feedback buffers per VM.
-pub const MAX_FEEDBACK_BUFFERS: usize = 16;
-
 /// Request structure for getting feedback buffer info.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FeedbackBufferInfoRequest {
-    /// Buffer index to query (0-15).
+    /// 0-based buffer index to query. The number of feedback buffers is
+    /// unbounded; querying an unregistered index reports `registered = 0`.
     pub index: u32,
     /// Reserved for alignment.
     pub _reserved: u32,
@@ -175,7 +173,7 @@ pub struct FeedbackBufferInfo {
     pub num_pages: u64,
     /// Whether a feedback buffer is registered (0 = no, 1 = yes).
     pub registered: u32,
-    /// Slot index this entry occupies (0..MAX_FEEDBACK_BUFFERS).
+    /// 0-based slot index this entry occupies.
     pub index: u32,
     /// Length of the meaningful prefix of `id`, in bytes.
     pub id_len: u32,

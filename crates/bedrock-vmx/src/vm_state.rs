@@ -14,12 +14,20 @@ use crate::prelude::*;
 type DeviceStatesBox = HeapBox<DeviceStates>;
 type ExitStatsBox = HeapBox<AllExitStats>;
 
-// Feedback buffers array type - boxed to avoid large stack allocation.
-// Each FeedbackBufferInfo is ~2KB (256 * 8 bytes for GPAs), so 16 of them = ~32KB.
-// Uses VmallocBox (kvmalloc in kernel) because kmalloc requires physically
-// contiguous pages (order:4) which can fail under watermark_boost pressure.
-pub type FeedbackBuffersArray = [Option<FeedbackBufferInfo>; MAX_FEEDBACK_BUFFERS];
-pub type FeedbackBuffersBox = VmallocBox<FeedbackBuffersArray>;
+/// Growable, unbounded collection of registered feedback buffers.
+///
+/// Stored as a heap vector of individually heap-boxed entries. The vector's
+/// own contiguous backing store only ever holds small pointers (one per
+/// buffer), so it stays tiny even with thousands of buffers; each ~2KB
+/// `FeedbackBufferInfo` is a separate allocation. This lets the *number* of
+/// registered buffers grow without bound and without ever requiring a large
+/// physically-contiguous kernel allocation (the per-buffer size is still
+/// capped at [`FEEDBACK_BUFFER_MAX_PAGES`]).
+///
+/// Registration is append-only within a VM's lifetime (there is no
+/// unregister hypercall), so a buffer's slot index is its position in this
+/// vector and is stable once assigned.
+pub type FeedbackBuffers = HeapVec<HeapBox<FeedbackBufferInfo>>;
 
 /// PEBS VM-entry MSR-load list entries, in fixed order. `pebs_pre_vm_entry`
 /// writes the value field of each entry; the index field is set once at
@@ -80,67 +88,25 @@ fn init_pebs_entry_msr_indexes(page_virt: u64) {
     }
 }
 
-/// Allocate feedback buffers directly on the heap, zeroed (all None).
-#[cfg(feature = "cargo")]
-fn box_feedback_buffers_empty() -> FeedbackBuffersBox {
-    extern crate alloc;
-    use alloc::vec::Vec;
-    let mut v: Vec<Option<FeedbackBufferInfo>> = Vec::with_capacity(MAX_FEEDBACK_BUFFERS);
-    for _ in 0..MAX_FEEDBACK_BUFFERS {
-        v.push(None);
-    }
-    let boxed_slice = v.into_boxed_slice();
-    let ptr = alloc::boxed::Box::into_raw(boxed_slice) as *mut FeedbackBuffersArray;
-    // SAFETY: Vec has exactly MAX_FEEDBACK_BUFFERS elements, so the boxed slice
-    // pointer can be safely reinterpreted as a pointer to a fixed-size array.
-    unsafe { alloc::boxed::Box::from_raw(ptr) }
+/// Create an empty feedback-buffers vector. Starts with no allocation; it
+/// grows on the heap as buffers are registered.
+fn feedback_buffers_new() -> FeedbackBuffers {
+    heap_vec_with_capacity(0).expect("Failed to allocate feedback buffers")
 }
 
-#[cfg(not(feature = "cargo"))]
-fn box_feedback_buffers_empty() -> FeedbackBuffersBox {
-    let mut boxed: kernel::alloc::KVBox<core::mem::MaybeUninit<FeedbackBuffersArray>> =
-        kernel::alloc::KVBox::new_uninit(kernel::alloc::flags::GFP_KERNEL)
-            .expect("Failed to allocate feedback buffers");
-    // SAFETY: Option<FeedbackBufferInfo> with None variant is all zeros
-    // (the discriminant for None is 0, and the rest is padding).
-    // We zero the entire allocation then assume_init, which is valid because
-    // all-zeros represents [None; MAX_FEEDBACK_BUFFERS].
-    unsafe {
-        let ptr = boxed.as_mut_ptr().cast::<u8>();
-        core::ptr::write_bytes(ptr, 0, core::mem::size_of::<FeedbackBuffersArray>());
-        boxed.assume_init()
+/// Clone the parent's feedback buffers into a fresh vector for a forked VM.
+/// Each entry is deep-copied into its own heap allocation so the child's
+/// buffers are independent of the parent's.
+fn feedback_buffers_from(parent: &FeedbackBuffers) -> FeedbackBuffers {
+    let mut v = heap_vec_with_capacity(parent.len()).expect("Failed to allocate feedback buffers");
+    for fb in parent.iter() {
+        // Copy heap-to-heap: materializing `**fb` (a ~2KB FeedbackBufferInfo)
+        // on the stack here would blow the 8KB kernel stack on the deep
+        // fork-creation call chain.
+        let cloned = heap_box_copy_from(&**fb).expect("Failed to clone feedback buffer");
+        heap_vec_push(&mut v, cloned).expect("Failed to clone feedback buffer");
     }
-}
-
-/// Clone feedback buffers from parent, allocating directly on heap.
-#[cfg(feature = "cargo")]
-fn box_feedback_buffers_from(parent: &FeedbackBuffersArray) -> FeedbackBuffersBox {
-    extern crate alloc;
-    use alloc::vec::Vec;
-    let mut v: Vec<Option<FeedbackBufferInfo>> = Vec::with_capacity(MAX_FEEDBACK_BUFFERS);
-    for item in parent.iter() {
-        v.push(*item);
-    }
-    let boxed_slice = v.into_boxed_slice();
-    let ptr = alloc::boxed::Box::into_raw(boxed_slice) as *mut FeedbackBuffersArray;
-    // SAFETY: Vec has exactly MAX_FEEDBACK_BUFFERS elements, so the boxed slice
-    // pointer can be safely reinterpreted as a pointer to a fixed-size array.
-    unsafe { alloc::boxed::Box::from_raw(ptr) }
-}
-
-#[cfg(not(feature = "cargo"))]
-fn box_feedback_buffers_from(parent: &FeedbackBuffersArray) -> FeedbackBuffersBox {
-    let mut boxed: kernel::alloc::KVBox<core::mem::MaybeUninit<FeedbackBuffersArray>> =
-        kernel::alloc::KVBox::new_uninit(kernel::alloc::flags::GFP_KERNEL)
-            .expect("Failed to allocate feedback buffers");
-    // SAFETY: We're writing to the entire array before assuming init.
-    // The MaybeUninit pointer is cast to the array type, then we copy
-    // all elements from the parent, fully initializing the allocation.
-    unsafe {
-        let ptr = boxed.as_mut_ptr().cast::<FeedbackBuffersArray>();
-        core::ptr::copy_nonoverlapping(parent.as_ptr(), (*ptr).as_mut_ptr(), MAX_FEEDBACK_BUFFERS);
-        boxed.assume_init()
-    }
+    v
 }
 
 /// Size of the I/O channel shared page (one 4KB page).
@@ -467,11 +433,32 @@ pub fn box_vm_state<V: VirtualMachineControlStructure, I: InstructionCounter>(
 
 const PAGE_SIZE: usize = 4096;
 
-/// Maximum number of pages in a feedback buffer (1MB = 256 pages).
+/// Maximum number of pages in a single feedback buffer (1MB = 256 pages).
+///
+/// This caps the size of an individual buffer. The *number* of feedback
+/// buffers a guest may register is unbounded (see [`FeedbackBuffers`]).
 pub const FEEDBACK_BUFFER_MAX_PAGES: usize = 256;
 
-/// Maximum number of feedback buffers per VM.
-pub const MAX_FEEDBACK_BUFFERS: usize = 16;
+/// Size of one feedback-buffer slot in the mmap file-offset layout (1MB).
+///
+/// A single buffer is capped at this size ([`FEEDBACK_BUFFER_MAX_PAGES`]
+/// pages), so feedback buffer `i` lives at file offset
+/// `base + i * FEEDBACK_BUFFER_SLOT_SIZE`. Because the per-buffer size is
+/// fixed, this fixed stride still works even though the *number* of buffers
+/// is unbounded. Shared by the kernel module's mmap handlers and the
+/// userspace mapper so the two never drift.
+pub const FEEDBACK_BUFFER_SLOT_SIZE: u64 = FEEDBACK_BUFFER_MAX_PAGES as u64 * PAGE_SIZE as u64;
+
+/// Fixed mmap file offset of the unified event buffer.
+///
+/// The feedback-buffer region is now unbounded (any number of 1MB slots), so
+/// the event buffer can no longer sit "just past" a fixed-size region — it
+/// lives at this sentinel offset instead. mmap file offsets are purely
+/// virtual, so a large value costs nothing; it only has to sit above the
+/// guest-memory and feedback-buffer regions for every realistic configuration
+/// (64 TiB). Shared by the kernel module's mmap handlers and the userspace
+/// mapper.
+pub const EVENT_BUFFER_MMAP_OFFSET: u64 = 1 << 46;
 
 /// Maximum length, in bytes, of a feedback-buffer identifier. Sized to fit a
 /// SHA-256 hex digest with room for a colon-separated suffix.
@@ -1087,11 +1074,11 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     /// successful arming, in retired guest instructions. Useful for diagnosing
     /// skid outliers by correlating them against the programmed PDist distance.
     pub last_pebs_arm_delta: u64,
-    /// Feedback buffers registered by guest via hypercall (up to MAX_FEEDBACK_BUFFERS).
+    /// Feedback buffers registered by the guest via hypercall (unbounded count).
     /// Used for efficient fuzzing feedback collection (e.g., coverage bitmap).
-    /// Guest specifies buffer index (0-15) in RDX when registering.
-    /// Boxed to avoid ~32KB stack allocation (each FeedbackBufferInfo is ~2KB).
-    pub feedback_buffers: FeedbackBuffersBox,
+    /// Each registration is appended; the assigned slot index is returned to
+    /// the guest in RAX. See [`FeedbackBuffers`] for the heap-growable layout.
+    pub feedback_buffers: FeedbackBuffers,
     /// VPID (Virtual Processor Identifier) allocated for this VM.
     /// Used for TLB tagging. Returned to free list when VM is dropped.
     /// 0 means no VPID allocated (VPID feature disabled or cargo/test mode).
@@ -1382,7 +1369,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             last_pebs_tsc_offset_delta: 0,
             last_pebs_iters_since_arm: 0,
             last_pebs_arm_delta: 0,
-            feedback_buffers: box_feedback_buffers_empty(),
+            feedback_buffers: feedback_buffers_new(),
             vpid,
             intercept_pf: false,
             pebs_state: None,
@@ -2290,7 +2277,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             last_pebs_tsc_offset_delta: 0,
             last_pebs_iters_since_arm: 0,
             last_pebs_arm_delta: 0,
-            feedback_buffers: box_feedback_buffers_empty(),
+            feedback_buffers: feedback_buffers_new(),
             vpid: 0, // Tests don't use VPID
             intercept_pf: false,
             pebs_state: None,
@@ -2558,7 +2545,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             last_pebs_tsc_offset_delta: 0,
             last_pebs_iters_since_arm: 0,
             last_pebs_arm_delta: 0,
-            feedback_buffers: box_feedback_buffers_from(&parent_state.feedback_buffers), // Copy feedback buffers from parent
+            feedback_buffers: feedback_buffers_from(&parent_state.feedback_buffers), // Deep-copy parent's feedback buffers
             vpid: allocated_vpid,
             intercept_pf: false,
             // Inherit PEBS registration from the parent — the forked guest is

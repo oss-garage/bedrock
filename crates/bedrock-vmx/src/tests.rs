@@ -657,9 +657,11 @@ fn test_vmcall_register_feedback_buffer_success() {
     // RIP should be advanced
     assert_eq!(ctx.get_guest_rip(), Some(0x1003));
 
-    // Feedback buffer should be registered at slot 0 (the first free slot)
-    let fb = ctx.state().feedback_buffers[0]
-        .as_ref()
+    // Feedback buffer should be registered at slot 0 (the first appended entry)
+    let fb = ctx
+        .state()
+        .feedback_buffers
+        .first()
         .expect("feedback buffer should be registered at slot 0");
     assert_eq!(fb.gva, 0x5000);
     assert_eq!(fb.size, 4096);
@@ -693,7 +695,7 @@ fn test_vmcall_register_feedback_buffer_invalid_size() {
     assert_eq!(ctx.gprs().rax, crate::exits::FB_ERR_BAD_SIZE);
 
     // Feedback buffer should NOT be registered at index 0
-    assert!(ctx.state().feedback_buffers[0].is_none());
+    assert!(ctx.state().feedback_buffers.is_empty());
 }
 
 #[test]
@@ -722,7 +724,7 @@ fn test_vmcall_register_feedback_buffer_size_too_large() {
     assert_eq!(ctx.gprs().rax, crate::exits::FB_ERR_BAD_SIZE);
 
     // Feedback buffer should NOT be registered at index 0
-    assert!(ctx.state().feedback_buffers[0].is_none());
+    assert!(ctx.state().feedback_buffers.is_empty());
 }
 
 #[test]
@@ -747,7 +749,7 @@ fn test_vmcall_register_feedback_buffer_bad_id_len() {
 
     assert_eq!(result, ExitHandlerResult::Continue);
     assert_eq!(ctx.gprs().rax, FB_ERR_BAD_ID_LEN);
-    assert!(ctx.state().feedback_buffers[0].is_none());
+    assert!(ctx.state().feedback_buffers.is_empty());
 }
 
 #[test]
@@ -774,7 +776,7 @@ fn test_vmcall_register_feedback_buffer_id_not_resident() {
 
     assert_eq!(result, ExitHandlerResult::Continue);
     assert_eq!(ctx.gprs().rax, FB_ERR_ID_NOT_RESIDENT);
-    assert!(ctx.state().feedback_buffers[0].is_none());
+    assert!(ctx.state().feedback_buffers.is_empty());
 }
 
 #[test]
@@ -803,7 +805,58 @@ fn test_vmcall_register_feedback_buffer_buffer_not_resident() {
 
     assert_eq!(result, ExitHandlerResult::Continue);
     assert_eq!(ctx.gprs().rax, FB_ERR_BUFFER_NOT_RESIDENT);
-    assert!(ctx.state().feedback_buffers[0].is_none());
+    assert!(ctx.state().feedback_buffers.is_empty());
+}
+
+#[test]
+fn test_vmcall_register_feedback_buffer_unbounded_count() {
+    use crate::hypercalls::HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+
+    let mut ctx = MockVmContext::new();
+    install_identity_paging(&mut ctx); // maps [0, 1GB)
+
+    // Stash an identifier inside the identity-mapped, memory-backed window.
+    let id_bytes = b"unbounded-id";
+    ctx.memory[0x6000..0x6000 + id_bytes.len()].copy_from_slice(id_bytes);
+
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_instruction_len(3);
+
+    // Register far more buffers than the old fixed cap (16) to prove the
+    // count is unbounded and the backing storage grows on the heap. Duplicate
+    // ids / GVAs are intentionally allowed; each registration appends a slot.
+    const N: u64 = 40;
+    for i in 0..N {
+        ctx.set_guest_rip(0x1000);
+        ctx.gprs_mut().rax = HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+        ctx.gprs_mut().rbx = 0x5000; // buffer GVA (resident in the 1GB window)
+        ctx.gprs_mut().rcx = 4096; // 1 page
+        ctx.gprs_mut().rdx = 0x6000; // id GVA
+        ctx.gprs_mut().rsi = id_bytes.len() as u64;
+
+        let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+        assert_eq!(
+            result,
+            ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFeedbackBuffer)
+        );
+        // RAX is the assigned slot index — the buffer's append position.
+        assert_eq!(
+            ctx.gprs().rax,
+            i,
+            "slot index should be the append position"
+        );
+        assert_eq!(ctx.state().feedback_buffers.len(), (i + 1) as usize);
+    }
+
+    assert_eq!(ctx.state().feedback_buffers.len(), N as usize);
+    let last = ctx
+        .state()
+        .feedback_buffers
+        .last()
+        .expect("at least one buffer registered");
+    assert_eq!(last.gva, 0x5000);
+    assert_eq!(last.id_bytes(), id_bytes);
 }
 
 // =============================================================================

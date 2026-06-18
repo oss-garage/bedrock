@@ -19,8 +19,9 @@ const MAX_FEEDBACK_BUFFER_SIZE: u64 = FEEDBACK_BUFFER_MAX_PAGES as u64 * 4096;
 /// callers can tell *why* a registration was rejected instead of seeing one
 /// opaque sentinel. Mirrored in `guest/libvmcall.h` as `VMCALL_FB_ERR_*`.
 ///
-/// Success returns the assigned slot index (`0..MAX_FEEDBACK_BUFFERS`), which
-/// can't collide with these: the slot count is tiny next to `u64::MAX`. The
+/// Success returns the assigned slot index (the buffer's position in the
+/// unbounded feedback-buffer vector), which can't collide with these: a
+/// realistic slot count is tiny next to `u64::MAX`. The
 /// `_NOT_RESIDENT` codes mean the guest passed a pointer whose page isn't
 /// faulted in — the hypervisor translates by walking the guest page tables and
 /// can't fault a page in on the guest's behalf, so the caller must touch (and,
@@ -29,7 +30,7 @@ pub const FB_ERR_BAD_SIZE: u64 = u64::MAX; // size 0 or > MAX_FEEDBACK_BUFFER_SI
 pub const FB_ERR_BAD_ID_LEN: u64 = u64::MAX - 1; // id length 0 or > max
 pub const FB_ERR_ID_NOT_RESIDENT: u64 = u64::MAX - 2; // id page not present
 pub const FB_ERR_BUFFER_NOT_RESIDENT: u64 = u64::MAX - 3; // buffer page(s) not present
-pub const FB_ERR_NO_SLOTS: u64 = u64::MAX - 4; // all slots in use
+pub const FB_ERR_NO_SLOTS: u64 = u64::MAX - 4; // failed to allocate a new slot (ENOMEM)
 
 /// Chunk size used to stage I/O channel bytes through a small stack buffer
 /// when crossing the VmState ↔ guest-memory borrow boundary.
@@ -168,7 +169,7 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             //   RSI = id length (1..=FEEDBACK_BUFFER_ID_MAX_LEN)
             //
             // Return (RAX):
-            //   on success — slot index that was assigned (0..MAX_FEEDBACK_BUFFERS)
+            //   on success — slot index that was assigned (its position in the buffer list)
             //   on failure — u64::MAX
             //
             // IDs are not required to be unique: two registrations with the
@@ -237,36 +238,39 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 }
             };
 
-            // Pick the first free slot. Duplicate ids are intentionally allowed.
-            let Some(buffer_idx) = ctx
-                .state()
-                .feedback_buffers
-                .iter()
-                .position(|slot| slot.is_none())
-            else {
-                log_err!(
-                    "HYPERCALL_REGISTER_FEEDBACK_BUFFER: all {} slots in use\n",
-                    MAX_FEEDBACK_BUFFERS
-                );
-                ctx.state_mut().gprs.rax = FB_ERR_NO_SLOTS;
-                if let Err(e) = advance_rip(ctx) {
-                    return ExitHandlerResult::Error(e);
-                }
-                return ExitHandlerResult::Continue;
-            };
-
-            ctx.state_mut().feedback_buffers[buffer_idx] = Some(FeedbackBufferInfo {
+            // Registration is append-only and the buffer count is unbounded:
+            // build the entry and push it onto the heap-growable vector. Its
+            // assigned slot index is simply its position in the vector.
+            // Duplicate ids are intentionally allowed.
+            //
+            // Only the buffer's GPAs are recorded here. For a forked VM the
+            // pages are copied-on-write lazily through the normal EPT
+            // write-fault path when the guest writes them; no copy is made at
+            // registration.
+            let info = FeedbackBufferInfo {
                 gva,
                 size,
                 num_pages,
                 gpas,
                 id: id_bytes,
                 id_len: id_len as u32,
-            });
-
-            // Pre-COW feedback buffer pages for stable userspace mapping
-            // even when the registration happens after fork.
-            ctx.pre_cow_feedback_buffer_at(buffer_idx, allocator);
+            };
+            let buffer_idx = ctx.state().feedback_buffers.len();
+            let pushed = match heap_box_try(info) {
+                Ok(boxed) => heap_vec_push(&mut ctx.state_mut().feedback_buffers, boxed).is_ok(),
+                Err(_) => false,
+            };
+            if !pushed {
+                log_err!(
+                    "HYPERCALL_REGISTER_FEEDBACK_BUFFER: failed to allocate slot {}\n",
+                    buffer_idx
+                );
+                ctx.state_mut().gprs.rax = FB_ERR_NO_SLOTS;
+                if let Err(e) = advance_rip(ctx) {
+                    return ExitHandlerResult::Error(e);
+                }
+                return ExitHandlerResult::Continue;
+            }
 
             log_info!(
                 "HYPERCALL_REGISTER_FEEDBACK_BUFFER: registered slot={} gva={:#x} size={} pages={} id_len={}\n",

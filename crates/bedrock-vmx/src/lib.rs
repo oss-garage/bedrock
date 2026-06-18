@@ -41,7 +41,7 @@ pub use traits::VmRunError;
 pub use vm::{ForkableVm, ForkedVm, ForkedVmError, ParentVm, RootVm, RootVmError};
 pub use vm_state::{
     AllExitStats, ExitStats, ExitTrigger, SyscallMsrs, VmState, VmStateError,
-    DEFAULT_TSC_FREQUENCY, PAT_DEFAULT,
+    DEFAULT_TSC_FREQUENCY, EVENT_BUFFER_MMAP_OFFSET, FEEDBACK_BUFFER_SLOT_SIZE, PAT_DEFAULT,
 };
 
 // Handler

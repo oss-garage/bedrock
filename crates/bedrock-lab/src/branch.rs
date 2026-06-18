@@ -570,13 +570,15 @@ impl Branch {
         let vm = self.vm.as_ref().expect("Branch.vm taken");
         let mut seen = std::collections::HashSet::new();
         let mut ids = Vec::new();
-        for slot in 0..bedrock_vm::MAX_FEEDBACK_BUFFERS {
-            if let Some(info) = vm.get_feedback_buffer_info_at(slot)? {
-                let id = info.id_bytes().to_vec();
-                if seen.insert(id.clone()) {
-                    ids.push(id);
-                }
+        // Registration is append-only and contiguous, so iterate until the
+        // first unregistered slot.
+        let mut slot = 0;
+        while let Some(info) = vm.get_feedback_buffer_info_at(slot)? {
+            let id = info.id_bytes().to_vec();
+            if seen.insert(id.clone()) {
+                ids.push(id);
             }
+            slot += 1;
         }
         Ok(ids)
     }

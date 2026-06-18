@@ -88,27 +88,26 @@ pub trait VmContext {
         false
     }
 
-    /// Pre-COW all feedback buffer pages to ensure stable physical addresses.
+    /// Copy-on-write every page of the feedback buffer at `index` into this
+    /// VM so that a host mapping of the buffer stays coherent with later guest
+    /// writes.
     ///
-    /// This should be called at fork time to pre-COW all registered feedback buffers.
+    /// A host mmap of a forked VM's feedback buffer maps the buffer's current
+    /// guest-physical frames directly. If a page is still shared from the
+    /// parent (not yet COW'd in this VM — e.g. a freshly forked child that
+    /// inherited a buffer its parent had already written), the mapping would
+    /// point at the parent's frame, and a later guest write would COW the page
+    /// to a *new* frame, leaving the mapping stale. COWing every page here
+    /// (allocating a child-owned, writable, EPT-RWX frame and copying the
+    /// parent's content) makes the mapped frame the same frame the guest
+    /// writes to, so the mapping reflects every subsequent write without a
+    /// remap. This is what makes "map once, keep running, re-read" work.
     ///
-    /// By pre-COWing these pages, userspace can mmap them without needing
-    /// to remap when the guest later writes to them.
-    ///
-    /// For root VMs, this is a no-op (no COW needed).
-    /// For forked VMs, this iterates through all registered feedback buffers and COWs them.
-    fn pre_cow_feedback_buffers<A: CowAllocator<Self::CowPage>>(&mut self, _allocator: &mut A) {
-        // Default: no-op for root VMs
-    }
-
-    /// Pre-COW feedback buffer pages at a specific index.
-    ///
-    /// This should be called at registration time (hypercall) when a buffer is
-    /// registered after fork.
-    ///
-    /// For root VMs, this is a no-op (no COW needed).
-    /// For forked VMs, this COWs the pages of the specified feedback buffer.
-    fn pre_cow_feedback_buffer_at<A: CowAllocator<Self::CowPage>>(
+    /// Called from the mmap handler. Pages already COW'd are skipped, so a
+    /// guest write that happened before the mapping is preserved rather than
+    /// clobbered. For root VMs this is a no-op: their EPT already maps writable
+    /// host memory directly.
+    fn cow_feedback_buffer_for_mapping<A: CowAllocator<Self::CowPage>>(
         &mut self,
         _index: usize,
         _allocator: &mut A,

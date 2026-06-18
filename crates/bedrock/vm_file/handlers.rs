@@ -650,16 +650,12 @@ pub(crate) fn handle_get_feedback_buffer_info<F: VmFileOps>(vm_file: &F, arg: us
     let request = unsafe { request.assume_init() };
     let index = request.index as usize;
 
-    // Validate index
-    if index >= super::super::vmx::MAX_FEEDBACK_BUFFERS {
-        return -(bindings::EINVAL as isize);
-    }
-
     let vm = vm_file.vm();
-    let fb = &vm.state().feedback_buffers[index];
-
-    let info = match fb {
-        Some(ref buffer) => BedrockFeedbackBufferInfo {
+    // The number of feedback buffers is unbounded; an unregistered or
+    // out-of-range index is reported as not-registered (registered = 0) so
+    // userspace can enumerate buffers by querying until the first gap.
+    let info = match vm.state().feedback_buffers.get(index) {
+        Some(buffer) => BedrockFeedbackBufferInfo {
             gva: buffer.gva,
             size: buffer.size,
             num_pages: buffer.num_pages as u64,

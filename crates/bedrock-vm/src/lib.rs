@@ -143,5 +143,4 @@ pub use vm::{
     EventConfig, ExitKind, ExitStatEntry, ExitStats, ExitStatsReport, ExitTrigger,
     FeedbackBufferInfo, IoctlStats, SingleStepConfig, Vm, VmExit, BEDROCK_DEVICE_PATH,
     DEFAULT_MEMORY_SIZE, DEFAULT_TSC_FREQUENCY, EVENT_BUFFER_SIZE, EXIT_REASON_CHECKPOINT,
-    MAX_FEEDBACK_BUFFERS,
 };

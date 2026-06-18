@@ -29,6 +29,35 @@ mod cargo_impl {
         alloc::boxed::Box::new(val)
     }
 
+    /// Box a value on the heap, returning `Err(AllocError)` if allocation
+    /// fails. In cargo builds the standard allocator aborts on OOM, so the
+    /// `Result` is just for API parity with kernel builds.
+    pub fn heap_box_try<T>(val: T) -> Result<HeapBox<T>, super::AllocError> {
+        Ok(alloc::boxed::Box::new(val))
+    }
+
+    /// Box a heap copy of `*src` without ever materializing it on the stack.
+    ///
+    /// `heap_box_try(*src)` would copy the (potentially large) value into a
+    /// stack temporary before moving it into the box; for kilobyte-sized POD
+    /// like `FeedbackBufferInfo` that blows the 8KB kernel stack on deep call
+    /// chains. This allocates uninitialized and copies heap-to-heap instead.
+    pub fn heap_box_copy_from<T: Copy>(src: &T) -> Result<HeapBox<T>, super::AllocError> {
+        use core::mem::MaybeUninit;
+        let mut boxed: alloc::boxed::Box<MaybeUninit<T>> =
+            alloc::boxed::Box::new(MaybeUninit::uninit());
+        // SAFETY: `boxed` points to a freshly-allocated, aligned, T-sized slot;
+        // `src` is a valid `&T`; the regions don't overlap. After the copy the
+        // slot is fully initialized, so the cast to `Box<T>` is sound. `T: Copy`
+        // means no `Drop`, so leaving `*src` in place creates no double-free.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, boxed.as_mut_ptr(), 1);
+            Ok(alloc::boxed::Box::from_raw(
+                alloc::boxed::Box::into_raw(boxed) as *mut T,
+            ))
+        }
+    }
+
     /// Create a vector with pre-allocated capacity.
     pub fn heap_vec_with_capacity<T>(cap: usize) -> Result<HeapVec<T>, super::AllocError> {
         Ok(alloc::vec::Vec::with_capacity(cap))
@@ -72,6 +101,35 @@ mod kernel_impl {
     pub fn heap_box<T>(val: T) -> HeapBox<T> {
         kernel::alloc::KBox::new(val, kernel::alloc::flags::GFP_KERNEL)
             .expect("Failed to allocate HeapBox")
+    }
+
+    /// Box a value on the heap, returning `Err(AllocError)` on allocation
+    /// failure instead of panicking. Use this on guest-controlled paths (e.g.
+    /// unbounded feedback-buffer registration) where an out-of-memory
+    /// condition must be reported to the guest rather than crashing the kernel.
+    pub fn heap_box_try<T>(val: T) -> Result<HeapBox<T>, super::AllocError> {
+        kernel::alloc::KBox::new(val, kernel::alloc::flags::GFP_KERNEL)
+            .map_err(|_| super::AllocError)
+    }
+
+    /// Box a heap copy of `*src` without ever materializing it on the stack.
+    ///
+    /// `heap_box_try(*src)` would copy the (potentially large) value into a
+    /// stack temporary before moving it into the box; for kilobyte-sized POD
+    /// like `FeedbackBufferInfo` that blows the 8KB kernel stack on deep call
+    /// chains. This allocates uninitialized and copies heap-to-heap instead.
+    pub fn heap_box_copy_from<T: Copy>(src: &T) -> Result<HeapBox<T>, super::AllocError> {
+        let mut boxed: kernel::alloc::KBox<core::mem::MaybeUninit<T>> =
+            kernel::alloc::KBox::new_uninit(kernel::alloc::flags::GFP_KERNEL)
+                .map_err(|_| super::AllocError)?;
+        // SAFETY: `boxed` points to a freshly-allocated, aligned, T-sized slot;
+        // `src` is a valid `&T`; the regions don't overlap. After the copy the
+        // slot is fully initialized, so `assume_init` is sound. `T: Copy` means
+        // no `Drop`, so leaving `*src` in place creates no double-free.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, boxed.as_mut_ptr(), 1);
+            Ok(boxed.assume_init())
+        }
     }
 
     /// Create a vector with pre-allocated capacity.
