@@ -1,0 +1,19 @@
+[package]
+name = "workload-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Streams podman container lifecycle events for the bedrock guest"
+
+# Installed into the guest rootfs at /usr/local/bin/workload-monitor and started
+# once at guest boot. A long-lived service that tails `podman events` and reports
+# them; built as a static musl binary so it is self-contained in the guest
+# rootfs.
+[[bin]]
+name = "workload-monitor"
+path = "src/main.rs"
+
+[dependencies]
+bedrock-assertions = { path = "../../crates/bedrock-assertions" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

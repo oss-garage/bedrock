@@ -45,17 +45,22 @@ const BOOT_RNG_SEED: u64 = 0xbed0_0001;
 static READY: OnceLock<Checkpoint> = OnceLock::new();
 static SINK: OnceLock<Arc<CaptureSink>> = OnceLock::new();
 
-/// Tree-wide [`EventSink`] that retains each branch's `Exit` records so
-/// determinism tests can compare guest state across sibling branches.
+/// Tree-wide [`EventSink`] that retains each branch's `Exit` records (so
+/// determinism tests can compare guest state across sibling branches) and its
+/// serial-console lines (so tests can observe guest output — e.g. the assertion
+/// pipeline's `[assertions] | …` lines — the way the host oracle does).
 ///
 /// One sink serves the whole tree (every branch, across parallel test
 /// threads), so records are bucketed by [`BranchId`]. Only branches that turn
 /// on exit capture via
 /// [`Branch::set_event_config`](bedrock_lab::Branch::set_event_config) produce
-/// records, so the sink stays empty for tests that don't ask for it.
+/// `Exit` records, so that map stays empty for tests that don't ask for it;
+/// serial capture is always on, so [`serial_lines`](Self::serial_lines)
+/// reflects every branch.
 #[derive(Default)]
 pub struct CaptureSink {
     records: Mutex<HashMap<BranchId, Vec<serde_json::Value>>>,
+    serial: Mutex<HashMap<BranchId, Vec<String>>>,
 }
 
 impl CaptureSink {
@@ -104,21 +109,48 @@ impl CaptureSink {
             })
             .collect()
     }
+
+    /// Snapshot, in order, the serial-console lines captured for `branch` so
+    /// far. Non-draining: repeated calls during a poll loop see the growing
+    /// log. Trailing `\n` is already stripped by the lab's line reassembler.
+    pub fn serial_lines(&self, branch: BranchId) -> Vec<String> {
+        self.serial
+            .lock()
+            .unwrap()
+            .get(&branch)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 impl EventSink for CaptureSink {
     fn on_event(&self, event: Event<'_>) {
-        // Retain only exit records; the borrowed `EventRecord` is serialized
-        // to an owned JSON value here since it can't outlive this call.
-        if let Event::Record { branch, record } = event {
-            if let Ok(value) = serde_json::to_value(record.to_json()) {
-                self.records
+        match event {
+            // Exit records: the borrowed `EventRecord` is serialized to an
+            // owned JSON value here since it can't outlive this call.
+            Event::Record { branch, record } => {
+                if let Ok(value) = serde_json::to_value(record.to_json()) {
+                    self.records
+                        .lock()
+                        .unwrap()
+                        .entry(branch)
+                        .or_default()
+                        .push(value);
+                }
+            }
+            // Serial output: SERIAL capture is forced on for every branch, so
+            // each complete console line — including the assertion pipeline's
+            // rendered lines — surfaces here. Retain per branch so tests can
+            // observe it. `line` borrows a per-branch buffer; copy it out.
+            Event::SerialLine { branch, line, .. } => {
+                self.serial
                     .lock()
                     .unwrap()
                     .entry(branch)
                     .or_default()
-                    .push(value);
+                    .push(String::from_utf8_lossy(line).into_owned());
             }
+            _ => {}
         }
     }
 }

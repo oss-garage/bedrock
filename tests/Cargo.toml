@@ -20,6 +20,7 @@ path = "integration/main.rs"
 harness = true
 
 [dev-dependencies]
+bedrock-assertions = { path = "../crates/bedrock-assertions" }
 bedrock-lab = { path = "../crates/bedrock-lab" }
 bedrock-vm = { path = "../crates/bedrock-vm" }
 serde_json = "1"

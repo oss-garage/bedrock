@@ -1,0 +1,12 @@
+[package]
+name = "bedrock-assertions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Assertion primitives for bedrock (Always/Sometimes)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

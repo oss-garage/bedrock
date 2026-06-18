@@ -17,3 +17,4 @@ mod boot;
 mod determinism;
 mod feedback;
 mod rng;
+mod workload_monitor;

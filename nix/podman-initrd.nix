@@ -123,6 +123,33 @@ let
     '';
   };
 
+  # Workload monitor (Rust). Tails `podman events` and records an exit-code
+  # assertion to /bedrock/assertions.jsonl on each container/exec death; it does
+  # not write to the guest log. Built as a static musl binary so it is
+  # self-contained in the rootfs; it has no native deps, so no extra
+  # buildInputs / pkg-config are needed. `-p workload-monitor` builds only that
+  # crate's dependency tree (bedrock-assertions + serde), not the vmx/kernel
+  # crates.
+  workloadMonitor = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+    pname = "workload-monitor";
+    version = "0.1.0";
+    src = pkgs.lib.cleanSourceWith {
+      src = ./..;
+      filter = path: type:
+        let baseName = builtins.baseNameOf path; in
+        !(baseName == "target" ||
+          baseName == ".git" ||
+          baseName == ".claude" ||
+          baseName == "nix" ||
+          (type == "directory" && baseName == "bedrock" &&
+           builtins.match ".*/crates/bedrock$" path != null));
+    };
+    cargoLock.lockFile = ../Cargo.lock;
+    cargoBuildFlags = [ "-p" "workload-monitor" ];
+    doCheck = false;
+    meta.mainProgram = "workload-monitor";
+  };
+
   # All runtime packages needed in the guest rootfs
   runtimePackages = [
     pkgs.podman
@@ -179,6 +206,16 @@ let
     # compose still take precedence if a workload needs `network_mode:
     # host` for a specific service.
     log_driver = "journald"
+
+    # Bind-mount the shared assertion sink into every container podman creates,
+    # without touching any compose file. It is a single JSONL file appended to
+    # by the host-side workload monitor and by workload code inside containers
+    # (e.g. `eventually_` drivers). The source must exist (the initrd
+    # pre-creates it) before a container starts, else podman bind-mounts an
+    # auto-created path in its place.
+    volumes = [
+      "/bedrock/assertions.jsonl:/bedrock/assertions.jsonl",
+    ]
 
     [engine]
     cgroup_manager = "cgroupfs"
@@ -328,6 +365,30 @@ let
         sleep 0.05
     done
 
+    # Shared assertion sink: an append-only JSONL file. The host-side workload
+    # monitor appends to it, and containers.conf bind-mounts it into every
+    # container so workload code (e.g. `eventually_` drivers) can append too.
+    # Create it as a regular file now — before the monitor starts and before
+    # `podman-compose up` — so the per-container bind mounts attach to the file
+    # rather than to an auto-created directory.
+    mkdir -p /bedrock
+    : > /bedrock/assertions.jsonl
+
+    # Surface the assertion sink in the guest log: follow it and pipe each line
+    # through `systemd-cat` into the journal under the `assertions` tag, so the
+    # journalctl formatter below renders every assertion (host- or
+    # container-written) as `[assertions] | …` on the serial console — where the
+    # host-side oracle reads it. `-F` re-follows across truncation/recreation
+    # and `-n +1` replays existing lines so nothing written before this is missed.
+    tail -n +1 -F /bedrock/assertions.jsonl 2>/dev/null | systemd-cat -t assertions &
+
+    # Start the workload monitor. It tails `podman events` and, on each container
+    # or exec death, appends an exit-code assertion to /bedrock/assertions.jsonl
+    # (surfaced as `[assertions]` by the tail above). It prints nothing to
+    # stdout; only its error diagnostics reach the journal via `systemd-cat`,
+    # rendered as `[workload-monitor]`.
+    workload-monitor 2>&1 | systemd-cat -t workload-monitor &
+
     # Load all workload images from the single docker-archive tarball.
     # `podman load` reads the embedded manifest to recover each image's
     # original name+tag, so a compose file referencing those names works
@@ -408,6 +469,13 @@ pkgs.stdenv.mkDerivation {
     # on PATH. Other bedrock helpers (shutdown, miner, etc.) are workload
     # concerns — workloads bake them into their own container images.
     ln -sf ${bedrockPebsRegister}/bin/bedrock-pebs-register rootfs/usr/local/bin/bedrock-pebs-register
+
+    # workload-monitor: watches podman container/exec lifecycle events and
+    # records exit-code assertions to /bedrock/assertions.jsonl. Lives on the
+    # guest rootfs (not inside any container image) so it observes every
+    # container from the host namespace.
+    install -m 0755 ${workloadMonitor}/bin/workload-monitor \
+        rootfs/usr/local/bin/workload-monitor
 
     # Guest kernel module for the deterministic I/O channel. Placed at a
     # stable path so the init script can insmod it without depending on
