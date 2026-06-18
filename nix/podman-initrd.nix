@@ -219,7 +219,6 @@ let
 
     [engine]
     cgroup_manager = "cgroupfs"
-    events_logger = "journald"
     runtime = "crun"
 
     [engine.runtimes]
