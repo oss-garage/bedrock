@@ -143,3 +143,36 @@ pub const HYPERCALL_SERIAL_WRITE: u64 = 9;
 /// 4. Stores `PebsState` in `VmState` so the APIC-timer precise-exit path
 ///    knows where to direct PEBS.
 pub const HYPERCALL_REGISTER_PEBS_PAGE: u64 = 3;
+
+/// Fetch the next chunk of a host-side file into the registered file-transfer
+/// feedback buffer.
+///
+/// Inputs: none in registers — the request and the response are framed inside
+/// the shared buffer the guest registered (via `HYPERCALL_REGISTER_FEEDBACK_BUFFER`
+/// under the id `bedrock-file-xfer`). Before issuing the hypercall the guest
+/// writes a request header into the start of that buffer:
+/// - bytes `[0..8)`:   `u64` little-endian file offset to read from.
+/// - bytes `[8..12)`:  `u32` little-endian length of the file name.
+/// - bytes `[12..16)`: reserved (zero).
+/// - bytes `[16..16+name_len)`: the file name (e.g. `images.tar`).
+///
+/// Outputs:
+/// - RAX: 0. The actual result is delivered in the buffer (see below).
+///
+/// The hypervisor does not touch the buffer; it merely advances RIP and exits
+/// to userspace with `ExitReason::VmcallFileFetch`. The host driver reads the
+/// request out of the (host-mapped) buffer, reads up to `buffer_size - 16`
+/// bytes of the named file starting at `offset`, and overwrites the buffer with
+/// a response:
+/// - bytes `[0..8)`: `i64` little-endian result — `>= 0` is the number of data
+///   bytes that follow (0 means EOF), `-1` means the file is unknown/unreadable.
+/// - bytes `[8..16)`: reserved (zero).
+/// - bytes `[16..16+result)`: the file data chunk.
+///
+/// The guest reads the result word back out of the buffer after the hypercall
+/// returns and loops, advancing `offset`, until it sees `0` (EOF). Because the
+/// served bytes are a pure function of the (fixed) host file and the chunk
+/// boundaries are fixed by the buffer size, the transfer is deterministic; it
+/// runs entirely during the root VM's boot, before `HYPERCALL_READY`, so forked
+/// VMs inherit the already-populated filesystem and never re-fetch.
+pub const HYPERCALL_FILE_FETCH: u64 = 10;

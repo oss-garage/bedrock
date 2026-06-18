@@ -77,6 +77,14 @@ typedef unsigned long long vmcall_u64;
 /* Emit bytes from the registered console page. RBX = byte count (<=PAGE). */
 #define HYPERCALL_SERIAL_WRITE 9ULL
 
+/*
+ * Fetch the next chunk of a host-side file into the registered file-transfer
+ * feedback buffer. No register arguments — the request and response are framed
+ * inside the buffer (see VMCALL_FILE_XFER_* below). Returns 0 in RAX; the real
+ * result is the response header the host writes into the buffer.
+ */
+#define HYPERCALL_FILE_FETCH 10ULL
+
 /* ------------------------------------------------------------------------- */
 /* ABI constants.                                                            */
 /* ------------------------------------------------------------------------- */
@@ -119,6 +127,30 @@ typedef unsigned long long vmcall_u64;
 #define VMCALL_PEBS_ERR_WALK_FAILED (VMCALL_ERR - 2ULL) /* (u64)-3 */
 #define VMCALL_PEBS_ERR_NO_EPT (VMCALL_ERR - 3ULL)      /* (u64)-4 */
 #define VMCALL_PEBS_ERR_ALREADY (VMCALL_ERR - 4ULL)     /* (u64)-5 */
+
+/*
+ * File-transmission framing (HYPERCALL_FILE_FETCH). The guest registers one
+ * feedback buffer under the id VMCALL_FILE_XFER_BUFFER_ID and uses it as the
+ * shared transport. Mirrors crates/bedrock-vm/src/file_xfer.rs — keep in sync.
+ *
+ * The first VMCALL_FILE_XFER_HEADER_LEN bytes of the buffer are the header;
+ * payload (the file name on a request, the file data on a response) follows it.
+ *
+ * Request (guest writes, before the hypercall):
+ *   [0..8)   u64 little-endian file offset to read from
+ *   [8..12)  u32 little-endian file-name length
+ *   [12..16) reserved (zero)
+ *   [16..16+name_len) the file name (e.g. "images.tar")
+ *
+ * Response (host writes, overwriting the buffer):
+ *   [0..8)   i64 little-endian result: >=0 = data byte count (0 = EOF),
+ *            VMCALL_FILE_XFER_NOT_FOUND = unknown/unreadable file
+ *   [8..16)  reserved (zero)
+ *   [16..16+result) the file data chunk
+ */
+#define VMCALL_FILE_XFER_BUFFER_ID "bedrock-file-xfer"
+#define VMCALL_FILE_XFER_HEADER_LEN 16U
+#define VMCALL_FILE_XFER_NOT_FOUND (-1LL)
 
 /* ------------------------------------------------------------------------- */
 /* Generic VMCALL primitives — hypercall number plus up to five arguments.   */
@@ -270,6 +302,17 @@ static inline vmcall_u64 vmcall_serial_register_page(const void *page)
 static inline vmcall_u64 vmcall_serial_write(vmcall_u64 len)
 {
 	return vmcall1(HYPERCALL_SERIAL_WRITE, len);
+}
+
+/*
+ * Fetch the next file chunk into the registered file-transfer buffer. The
+ * request must already be framed at the start of the buffer (see
+ * VMCALL_FILE_XFER_* above); the host overwrites the buffer with the response.
+ * Always returns 0 — read the result out of the buffer header.
+ */
+static inline vmcall_u64 vmcall_file_fetch(void)
+{
+	return vmcall0(HYPERCALL_FILE_FETCH);
 }
 
 #ifdef __cplusplus

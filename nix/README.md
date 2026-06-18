@@ -19,24 +19,25 @@ nix run .#integration-tests     # bedrock-lab integration suite (set BEDROCK_INI
 | `bedrockModule` | `bedrock.ko` kernel module |
 | `guestKernel` | Linux 6.18 with determinism patches (TLB flush) + `vmlinux` |
 | `guestInitrd` | Trivial initramfs (boots, VMCALL shutdown) |
+| `podmanInitrd` | Generic podman initramfs (downloads its workload at boot) |
 | `bedrock-cli` | CLI for loading and running guest VMs |
 | `bedrock-determinism` | Determinism checker (multi-run comparison) |
 
-The podman initrd is exposed as a function `mkPodmanInitrd` under
-`lib.<system>` — workloads supply a compose file and a docker-archive
-tarball (from `docker save`) and the function returns a bootable initramfs:
+There is one generic podman initrd, exposed both as the `podmanInitrd` package
+and under `lib.<system>`. It serves every workload: the guest downloads its
+`compose.yaml` and `images.tar` from the host at boot over the
+file-transmission hypercall (`HYPERCALL_FILE_FETCH`). The host serves them at
+runtime, so a workload is launched by handing those two files to bedrock-cli:
 
-```nix
-let
-  bedrock = inputs.bedrock;
-  myInitrd = bedrock.lib.x86_64-linux.mkPodmanInitrd {
-    composeYaml = ./compose.yaml;
-    imagesTar   = ./images.tar;   # docker save img1 [img2 ...] -o images.tar
-  };
-in ...
+```sh
+bedrock-cli -m 5120 -i <podmanInitrd> \
+  --file compose.yaml=./compose.yaml \
+  --file images.tar=./images.tar \
+  <vmlinux>
 ```
 
-Build any with `nix build .#<name>`.
+or, from the lab/fuzzers, via `LabOpts.files`. Build any package with
+`nix build .#<name>`.
 
 ## Host Requirements
 
@@ -45,7 +46,7 @@ Build any with `nix build .#<name>`.
 ```
 experimental-features = nix-command flakes
 sandbox = relaxed
-extra-sandbox-paths = /dev/kvm
+extra-sandbox-paths = /dev/kvm?
 ```
 
 - **`nix-command flakes`**: Required for `nix build`, `nix run`, etc.
@@ -55,8 +56,11 @@ extra-sandbox-paths = /dev/kvm
   FODs to access the network while keeping other builds sandboxed. The
   initrd builder itself does not need network access — it only consumes the
   `images.tar` you supply.
-- **`extra-sandbox-paths = /dev/kvm`**: Exposes KVM to the build sandbox so
-  `nix run .#test-vm` can launch the NixOS test VM with hardware acceleration.
+- **`extra-sandbox-paths = /dev/kvm?`**: Exposes KVM to the build sandbox for
+  `nix run .#test-vm` (the only build that uses it). The trailing `?` makes the
+  mount optional — required because bedrock owns VMX, so `/dev/kvm` is absent
+  whenever the module is loaded, and without it every sandboxed build fails to
+  set up.
 
 Restart the daemon after changes: `systemctl restart nix-daemon`
 
@@ -71,8 +75,13 @@ Restart the daemon after changes: `systemctl restart nix-daemon`
 - Host kernel 6.18 with bedrock module loaded
 - `/dev/bedrock` device present
 - KVM must NOT be loaded (bedrock owns VMX)
-- `.#integration-tests` additionally needs `BEDROCK_INITRAMFS` pointing at the
-  integration-tests workload initrd (`just build-workload integration-tests`)
+- The workload's `images.tar` built on disk (`./workloads/<name>/build.sh`). The
+  guest downloads it and `compose.yaml` at boot; both apps read them from the
+  on-disk `workloads/<name>/` files at runtime, so no git staging is needed. Run
+  these apps from the repo root. `.#integration-tests` serves them via
+  `BEDROCK_COMPOSE` / `BEDROCK_IMAGES` and boots the generic `podmanInitrd`
+  (override any of `BEDROCK_VMLINUX` / `BEDROCK_INITRAMFS` / `BEDROCK_COMPOSE` /
+  `BEDROCK_IMAGES` to point elsewhere).
 
 ### For `nix run .#vm` (interactive dev VM)
 
@@ -101,31 +110,35 @@ The podman initrd is built entirely from nixpkgs packages (podman, crun,
 netavark, journald, etc.). The Nix store closure is copied into the rootfs
 with FHS symlinks so the init script and containers find their tools. The
 only bedrock-specific bits the initrd ships are `bedrock-pebs-register`
-(run at boot to enable precise EPT-friendly PEBS exits) and the
+(run at boot to enable precise EPT-friendly PEBS exits), `bedrock-file-fetch`
+(run at boot to download the workload files — see below), and the
 `bedrock-io.ko` kernel module (the deterministic I/O channel).
 
-Workloads are everything else — compose file plus container images.
-Anything workload-specific (helper binaries, driver scripts, configs) gets
-baked into one of the images. Produce `images.tar` with whatever toolchain
-you like (`docker build` + `docker save` outside Nix, or
-`dockerTools.buildLayeredImage` inside Nix) and hand it to
-`mkPodmanInitrd` along with the compose file.
+The initrd is generic, common to every workload. At boot, `bedrock-file-fetch`
+downloads the workload's `compose.yaml` and `images.tar` from the host over the
+file-transmission hypercall (`HYPERCALL_FILE_FETCH`): it registers a 1 MB
+feedback buffer as the transport and pulls each file in chunks, the host
+serving the bytes directly into that buffer. Anything else workload-specific
+(helper binaries, driver scripts, configs) gets baked into one of the images.
+Produce `images.tar` with whatever toolchain you like (`docker build` +
+`docker save` outside Nix, or `dockerTools.buildLayeredImage` inside Nix).
 
 ### Workloads
 
-Workloads live in `workloads/<name>/`. The flake auto-discovers every
-subdirectory and exposes a `<name>Initrd` package once `images.tar` shows
-up in the flake source. Build (and run / boot) a workload with:
+Workloads live in `workloads/<name>/` (a `compose.yaml` plus a built
+`images.tar`). There is one generic `podmanInitrd` for all of them; the
+workload's two files are handed to the guest at runtime. Build a workload's
+image tarball with:
 
 ```bash
-just build-workload bitcoin    # prints the /nix/store/...-initrd path
+just build-workload bitcoin    # builds images.tar, prints the generic initrd path
 ```
 
-`build-workload` runs the workload's `build.sh`, stages the resulting
-`images.tar` (`git add -f`), invokes `nix build`, prints the output
-path, then unstages on `EXIT` so the tarball can't end up in a commit by
-accident — even if the build is interrupted. The tarball itself stays
-gitignored.
+`build-workload` runs the workload's `build.sh` and builds the generic
+`podmanInitrd`, printing its path. To boot the workload, pass its files to
+bedrock-cli with `--file compose.yaml=… --file images.tar=…` (see the recipe's
+comment); the files are read from disk at runtime, so the gitignored
+`images.tar` needs no staging.
 
 For the bitcoin workload specifically, `build.sh` does `docker pull` +
 two `docker build`s (a miner image FROM `bitcoin/bitcoin:latest` with
@@ -133,6 +146,5 @@ two `docker build`s (a miner image FROM `bitcoin/bitcoin:latest` with
 baked in), then `docker save`s all three images into one archive. See
 `workloads/bitcoin/build.sh` and the per-image `Dockerfile`s.
 
-CI (`.github/workflows/nix.yml`) runs the same `build.sh` + `git add -f`
-steps before invoking the integration test — its checkout is ephemeral
-so the unstage isn't needed there.
+CI (`.github/workflows/nix.yml`) just runs `build.sh` before invoking the
+test/workload app, which reads the on-disk files at runtime.

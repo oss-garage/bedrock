@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the bitcoin workload's container images and pack them into a single
-# docker-archive tarball at workloads/bitcoin/images.tar. Hand that file
-# (along with compose.yaml) to mkPodmanInitrd in flake.nix to bake them
-# into a bootable bedrock initramfs.
+# docker-archive tarball at workloads/bitcoin/images.tar. That file and
+# compose.yaml are served to the guest at runtime over the file-transmission
+# hypercall (the guest's generic initrd downloads them at boot) — e.g. via
+# `bedrock-cli --file compose.yaml=… --file images.tar=…`, or the lab's
+# LabOpts.files. See nix/podman-initrd.nix.
 #
 # Usage:  ./build.sh
 #

@@ -294,6 +294,21 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             // record that precise exits are now usable for this VM).
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallPebsPage)
         }
+        HYPERCALL_FILE_FETCH => {
+            // The guest has framed a file-fetch request (offset + name) into
+            // the start of the registered `bedrock-file-xfer` feedback buffer
+            // and wants the next chunk. The hypervisor owns none of this: the
+            // host driver reads the request out of the (host-mapped) buffer,
+            // reads the file chunk, and overwrites the buffer with the response
+            // before the next RUN. We only advance RIP and exit to userspace.
+            // RAX is set to 0; the meaningful result (chunk length / EOF / error)
+            // is delivered in the buffer's response header, not in a register.
+            ctx.state_mut().gprs.rax = 0;
+            if let Err(e) = advance_rip(ctx) {
+                return ExitHandlerResult::Error(e);
+            }
+            ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFileFetch)
+        }
         HYPERCALL_IO_REGISTER_PAGE => {
             // RBX = guest virtual address of the shared 4KB page.
             // Must be 4KB-aligned; the GPA is what we record because the

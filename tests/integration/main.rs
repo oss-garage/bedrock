@@ -16,5 +16,6 @@ mod bash_io;
 mod boot;
 mod determinism;
 mod feedback;
+mod file_xfer;
 mod rng;
 mod workload_monitor;

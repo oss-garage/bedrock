@@ -13,6 +13,7 @@ use clap::Parser;
 use log::{debug, info, trace, warn};
 
 use bedrock_vm::events::EventKind;
+use bedrock_vm::file_xfer::FileServer;
 use bedrock_vm::io_channel;
 use bedrock_vm::{
     load_kernel, ConsoleLine, EventCategories, EventConfig, EventStream, ExitKind, ExitStatsReport,
@@ -439,6 +440,20 @@ fn run() -> io::Result<()> {
         info!("Queued {} I/O actions", io_schedule.len());
     }
 
+    // Build the file server for the file-transmission hypercall. The guest's
+    // initrd downloads its workload files (compose.yaml / images.tar) by name
+    // at boot; we serve them from the host paths the user passed via
+    // `--file <name>=<path>`.
+    let mut file_server =
+        FileServer::new(args.files.iter().map(|f| (f.name.clone(), f.path.clone())));
+    if !file_server.is_empty() {
+        info!(
+            "Serving {} file(s) over the file-transmission hypercall: {}",
+            args.files.len(),
+            file_server.names().collect::<Vec<_>>().join(", ")
+        );
+    }
+
     // Run VM
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
@@ -539,6 +554,13 @@ fn run() -> io::Result<()> {
                     }
                     ExitKind::VmcallReady => {
                         info!("VM ready (VMCALL hypercall) at tsc {}", exit.emulated_tsc);
+                        continue;
+                    }
+                    ExitKind::FileFetch => {
+                        match file_server.serve(&mut vm) {
+                            Ok(n) => trace!("Served file chunk ({} bytes)", n),
+                            Err(e) => warn!("Failed to serve file fetch: {}", e),
+                        }
                         continue;
                     }
                     ExitKind::Continue | ExitKind::EventBufferFull => continue,

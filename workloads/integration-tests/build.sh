@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the integration-tests workload's container image and pack it into a
-# docker-archive tarball at workloads/integration-tests/images.tar. Hand that
-# file (along with compose.yaml) to mkPodmanInitrd in flake.nix to bake it
-# into a bootable bedrock initramfs.
+# docker-archive tarball at workloads/integration-tests/images.tar. That file
+# and compose.yaml are served to the guest at runtime over the file-transmission
+# hypercall (the guest's generic initrd downloads them at boot) — the
+# integration-tests harness/app serves them via BEDROCK_COMPOSE / BEDROCK_IMAGES.
+# See nix/podman-initrd.nix.
 #
 # Usage:  ./build.sh
 #

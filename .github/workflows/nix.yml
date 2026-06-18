@@ -48,18 +48,14 @@ jobs:
         with:
           name: bedrock
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      # Stage the workload image so the flake can build its initrd (the flake
-      # only sees git-tracked files; images.tar is gitignored).
+      # Build the workload image; the guest downloads it at boot, served from
+      # the host paths in BEDROCK_COMPOSE / BEDROCK_IMAGES below.
       - run: ./workloads/integration-tests/build.sh
-      - run: git add -f workloads/integration-tests/images.tar
       - run: sudo rmmod kvm-intel || true
       - run: sudo rmmod kvm || true
       - run: PATH="$HOME/.cargo/bin:/usr/lib/llvm-18/bin:$PATH" just build
       - run: sudo just load
-      # Run the bedrock-lab integration suite. `nix run` builds the test binary
-      # (and the workload initrd) hermetically — cargo runs in the nix sandbox,
-      # not the runner's admin-owned ~/.cargo — then runs it against
-      # /dev/bedrock.
+      # Run the bedrock-lab integration suite against /dev/bedrock.
       - run: nix run .#integration-tests -- --nocapture
 
   bitcoin:
@@ -75,7 +71,6 @@ jobs:
           name: bedrock
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - run: ./workloads/bitcoin/build.sh
-      - run: git add -f workloads/bitcoin/images.tar
       - run: sudo rmmod kvm-intel || true
       - run: sudo rmmod kvm || true
       - run: PATH="$HOME/.cargo/bin:/usr/lib/llvm-18/bin:$PATH" just build

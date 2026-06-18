@@ -130,6 +130,26 @@ pub struct Args {
     ///   --io-action 'vt=120.0:exec:bitcoind1:bitcoin-cli getblockchaininfo'
     #[arg(long = "io-action", value_parser = parse_scheduled_io_action, verbatim_doc_comment)]
     pub io_actions: Vec<ScheduledIoAction>,
+
+    /// Expose a host file to the guest over the file-transmission hypercall.
+    /// Repeatable. Format: `<guest-name>=<host-path>`. The guest's initrd
+    /// downloads files by name at boot (e.g. its `compose.yaml` and
+    /// `images.tar`), so a podman workload is launched with the generic initrd
+    /// plus, for example:
+    ///   --file compose.yaml=workloads/bitcoin/compose.yaml
+    ///   --file images.tar=workloads/bitcoin/images.tar
+    #[arg(long = "file", value_parser = parse_file_arg, verbatim_doc_comment)]
+    pub files: Vec<FileArg>,
+}
+
+/// One `--file <guest-name>=<host-path>` mapping: a file the guest can pull
+/// over the file-transmission hypercall by `name`.
+#[derive(Clone, Debug)]
+pub struct FileArg {
+    /// The name the guest requests (e.g. `images.tar`).
+    pub name: String,
+    /// The host path served for that name.
+    pub path: String,
 }
 
 /// One scheduled I/O channel action. Parsed from the CLI's repeated
@@ -264,6 +284,27 @@ fn parse_f64(s: &str) -> Result<f64, String> {
     s.trim()
         .parse()
         .map_err(|_| format!("Invalid number: {}", s))
+}
+
+/// Parse a `--file` spec (`<guest-name>=<host-path>`) into a [`FileArg`].
+///
+/// Splits on the first `=` so host paths may contain `=`. Both sides must be
+/// non-empty.
+fn parse_file_arg(s: &str) -> Result<FileArg, String> {
+    let (name, path) = s
+        .split_once('=')
+        .ok_or_else(|| format!("Invalid --file '{}'. Expected <guest-name>=<host-path>", s))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("Empty guest name in --file '{}'", s));
+    }
+    if path.is_empty() {
+        return Err(format!("Empty host path in --file '{}'", s));
+    }
+    Ok(FileArg {
+        name: name.to_string(),
+        path: path.to_string(),
+    })
 }
 
 /// Parse a `--io-action` spec into a `ScheduledIoAction`.

@@ -56,32 +56,19 @@
       # Trivial guest initramfs (boots and immediately shuts down via VMCALL)
       guestInitrd = import ./nix/trivial-initrd.nix { inherit pkgs; };
 
-      # Builder for the podman initrd. Takes a compose.yaml and a single
-      # docker-archive tarball (from `docker save`); see nix/podman-initrd.nix
-      # for the schema. Workloads do their own image building outside Nix
-      # and feed the resulting `images.tar` in here.
-      mkPodmanInitrd = { composeYaml, imagesTar }:
-        import ./nix/podman-initrd.nix {
-          inherit pkgs guestKernel composeYaml imagesTar;
-        };
+      # The podman guest initramfs. One generic initrd serves every workload.
+      # The workload's compose.yaml / images.tar are downloaded at boot over the
+      # file-transmission hypercall (HYPERCALL_FILE_FETCH); the host serves them
+      # at runtime (bedrock-cli --file …, or the lab's LabOpts.files). See
+      # nix/podman-initrd.nix.
+      podmanInitrd = import ./nix/podman-initrd.nix {
+        inherit pkgs guestKernel;
+      };
 
-      # Auto-discovered workloads. Each subdirectory of workloads/ becomes a
-      # package <name>Initrd once its images.tar shows up in the flake source.
-      # Run `just build-workload <name>` to produce + stage the tarball
-      # transiently (it's gitignored and gets unstaged after the build).
-      # Workloads without an images.tar are silently skipped so the rest of
-      # the flake still evaluates cleanly.
-      workloadInitrds = let
-        workloadsDir = ./workloads;
-      in pkgs.lib.mapAttrs' (name: _:
-        pkgs.lib.nameValuePair "${name}Initrd" (mkPodmanInitrd {
-          composeYaml = workloadsDir + "/${name}/compose.yaml";
-          imagesTar   = workloadsDir + "/${name}/images.tar";
-        })
-      ) (pkgs.lib.filterAttrs (name: type:
-        type == "directory"
-        && builtins.pathExists (workloadsDir + "/${name}/images.tar")
-      ) (builtins.readDir workloadsDir));
+      # A workload is a directory under workloads/ holding a compose.yaml and a
+      # built images.tar (`./workloads/<name>/build.sh`). Both are served to the
+      # guest at runtime over the file-transmission hypercall — read from disk,
+      # not from the flake source — so they need no git staging.
 
       userland = import ./nix/userland.nix { inherit pkgs; };
 
@@ -117,14 +104,15 @@
         check-stack = checkStack;
         bedrock-cli = userland.bedrock-cli;
         bedrock-determinism = userland.bedrock-determinism;
+        inherit podmanInitrd;
         default = userland.bedrock-cli;
-      } // workloadInitrds;
+      };
 
-      # `mkPodmanInitrd` is a function — keep it out of `packages` (which
-      # nix expects to be derivations) and expose it via `lib` so external
-      # flakes can build their own workloads against this one.
+      # The generic podman initrd is exposed via `lib` too so external flakes
+      # can boot their own workloads against it (handing the workload files to
+      # bedrock-cli / the lab at runtime).
       lib.${system} = {
-        inherit mkPodmanInitrd;
+        inherit podmanInitrd;
       };
 
       apps.${system} = {
@@ -156,9 +144,8 @@
 
         # Boot the bitcoin workload guest directly on the host:
         #   nix run .#test-bitcoin-workload
-        # Requires: host kernel 6.18 with bedrock module loaded, /dev/bedrock
-        # present, and the bitcoin workload staged
-        # (git add -f workloads/bitcoin/images.tar) so the flake can see it.
+        # Requires the bedrock module loaded, /dev/bedrock present, and the
+        # bitcoin images built (./workloads/bitcoin/build.sh).
         test-bitcoin-workload = let
           script = pkgs.writeShellScript "bedrock-test-bitcoin-workload" ''
             set -e
@@ -166,30 +153,26 @@
 
             echo "=== Bedrock bitcoin workload ==="
 
-            # Check module is loaded
             if ! lsmod | grep -q bedrock; then
               echo "ERROR: bedrock module not loaded. Run: insmod bedrock.ko"
               exit 1
             fi
-
             if [ ! -c /dev/bedrock ]; then
               echo "ERROR: /dev/bedrock not found"
               exit 1
             fi
-
-            echo "Module loaded, /dev/bedrock present"
-
-            ${if (workloadInitrds ? bitcoinInitrd) then ''
-              echo "--- Booting bitcoin podman guest ---"
-              bedrock-cli -m 5120 \
-                -i ${workloadInitrds.bitcoinInitrd} \
-                ${guestKernel}/vmlinux
-              echo "--- Bitcoin guest: OK ---"
-            '' else ''
-              echo "ERROR: bitcoin workload images.tar not in the flake source." >&2
-              echo "Stage it first: git add -f workloads/bitcoin/images.tar" >&2
+            if [ ! -f workloads/bitcoin/images.tar ]; then
+              echo "ERROR: workloads/bitcoin/images.tar not found." >&2
+              echo "Build it first: ./workloads/bitcoin/build.sh" >&2
               exit 1
-            ''}
+            fi
+
+            echo "--- Booting bitcoin podman guest ---"
+            bedrock-cli -m 5120 \
+              -i ${podmanInitrd} \
+              --file compose.yaml=workloads/bitcoin/compose.yaml \
+              --file images.tar=workloads/bitcoin/images.tar \
+              ${guestKernel}/vmlinux
             echo "=== Bitcoin workload: OK ==="
           '';
         in {
@@ -202,10 +185,9 @@
         # The test binary is compiled hermetically by nix (cargo runs inside
         # the build sandbox with its own CARGO_HOME, so it never touches the
         # caller's ~/.cargo), then run on the host against a loaded bedrock
-        # module / /dev/bedrock. Like test-bitcoin-workload, the workload initrd
-        # is built by nix from the staged images.tar (stage it with
-        # `git add -f workloads/integration-tests/images.tar`); BEDROCK_VMLINUX
-        # and BEDROCK_INITRAMFS can override the guest kernel / initrd.
+        # module / /dev/bedrock. Run from the repo root so the workload files
+        # resolve; BEDROCK_VMLINUX / BEDROCK_INITRAMFS / BEDROCK_COMPOSE /
+        # BEDROCK_IMAGES can override the guest kernel / initrd / workload files.
         integration-tests = let
           testBin = pkgs.rustPlatform.buildRustPackage {
             pname = "bedrock-integration-tests-bin";
@@ -239,19 +221,21 @@
             '';
             doCheck = false;
           };
-          # Default the initrd to the nix-built workload (present when its
-          # images.tar is staged), exactly like test-bitcoin-workload.
-          defaultInitrd = workloadInitrds.integration-testsInitrd or null;
+          # The generic podman initrd downloads the workload's files at boot over
+          # the file-transmission hypercall; the harness
+          # (tests/integration/common.rs) serves them from BEDROCK_COMPOSE /
+          # BEDROCK_IMAGES. These default to the on-disk workload files (built by
+          # ./workloads/integration-tests/build.sh); override any of the four to
+          # point elsewhere.
           script = pkgs.writeShellScript "bedrock-integration-tests" ''
             set -euo pipefail
             export BEDROCK_VMLINUX="''${BEDROCK_VMLINUX:-${guestKernel}/vmlinux}"
-            ${pkgs.lib.optionalString (defaultInitrd != null)
-              ''export BEDROCK_INITRAMFS="''${BEDROCK_INITRAMFS:-${defaultInitrd}}"''}
-            if [ -z "''${BEDROCK_INITRAMFS:-}" ]; then
-              echo "ERROR: the integration-tests workload isn't staged and" >&2
-              echo "BEDROCK_INITRAMFS is unset. Stage its image so nix can build" >&2
-              echo "the initrd: git add -f workloads/integration-tests/images.tar" >&2
-              echo "(or set BEDROCK_INITRAMFS to a prebuilt initrd)." >&2
+            export BEDROCK_INITRAMFS="''${BEDROCK_INITRAMFS:-${podmanInitrd}}"
+            export BEDROCK_COMPOSE="''${BEDROCK_COMPOSE:-workloads/integration-tests/compose.yaml}"
+            export BEDROCK_IMAGES="''${BEDROCK_IMAGES:-workloads/integration-tests/images.tar}"
+            if [ ! -f "$BEDROCK_IMAGES" ]; then
+              echo "ERROR: $BEDROCK_IMAGES not found." >&2
+              echo "Build it first: ./workloads/integration-tests/build.sh" >&2
               exit 1
             fi
             exec ${testBin}/bin/bedrock-integration-tests "$@"
