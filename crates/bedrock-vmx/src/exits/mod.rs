@@ -52,6 +52,10 @@ pub use qualifications::{
     RdrandOperandSize,
 };
 pub use reasons::ExitReason;
+pub use vmcall::{
+    FB_ERR_BAD_ID_LEN, FB_ERR_BAD_SIZE, FB_ERR_BUFFER_NOT_RESIDENT, FB_ERR_ID_NOT_RESIDENT,
+    FB_ERR_NO_SLOTS,
+};
 
 // Internal imports for handle_exit
 use cpuid::handle_cpuid;

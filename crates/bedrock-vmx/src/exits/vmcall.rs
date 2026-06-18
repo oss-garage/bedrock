@@ -15,6 +15,22 @@ use crate::prelude::*;
 /// Maximum feedback buffer size (1 MB = 256 pages).
 const MAX_FEEDBACK_BUFFER_SIZE: u64 = FEEDBACK_BUFFER_MAX_PAGES as u64 * 4096;
 
+/// Distinct RAX error codes for `HYPERCALL_REGISTER_FEEDBACK_BUFFER`, so guest
+/// callers can tell *why* a registration was rejected instead of seeing one
+/// opaque sentinel. Mirrored in `guest/libvmcall.h` as `VMCALL_FB_ERR_*`.
+///
+/// Success returns the assigned slot index (`0..MAX_FEEDBACK_BUFFERS`), which
+/// can't collide with these: the slot count is tiny next to `u64::MAX`. The
+/// `_NOT_RESIDENT` codes mean the guest passed a pointer whose page isn't
+/// faulted in — the hypervisor translates by walking the guest page tables and
+/// can't fault a page in on the guest's behalf, so the caller must touch (and,
+/// for the buffer, pin) the memory first.
+pub const FB_ERR_BAD_SIZE: u64 = u64::MAX; // size 0 or > MAX_FEEDBACK_BUFFER_SIZE
+pub const FB_ERR_BAD_ID_LEN: u64 = u64::MAX - 1; // id length 0 or > max
+pub const FB_ERR_ID_NOT_RESIDENT: u64 = u64::MAX - 2; // id page not present
+pub const FB_ERR_BUFFER_NOT_RESIDENT: u64 = u64::MAX - 3; // buffer page(s) not present
+pub const FB_ERR_NO_SLOTS: u64 = u64::MAX - 4; // all slots in use
+
 /// Chunk size used to stage I/O channel bytes through a small stack buffer
 /// when crossing the VmState ↔ guest-memory borrow boundary.
 ///
@@ -169,7 +185,7 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                     "HYPERCALL_REGISTER_FEEDBACK_BUFFER: invalid size {}\n",
                     size
                 );
-                ctx.state_mut().gprs.rax = !0u64;
+                ctx.state_mut().gprs.rax = FB_ERR_BAD_SIZE;
                 if let Err(e) = advance_rip(ctx) {
                     return ExitHandlerResult::Error(e);
                 }
@@ -182,7 +198,7 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                     id_len,
                     FEEDBACK_BUFFER_ID_MAX_LEN
                 );
-                ctx.state_mut().gprs.rax = !0u64;
+                ctx.state_mut().gprs.rax = FB_ERR_BAD_ID_LEN;
                 if let Err(e) = advance_rip(ctx) {
                     return ExitHandlerResult::Error(e);
                 }
@@ -198,7 +214,7 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                     id_gva,
                     id_len
                 );
-                ctx.state_mut().gprs.rax = !0u64;
+                ctx.state_mut().gprs.rax = FB_ERR_ID_NOT_RESIDENT;
                 if let Err(e) = advance_rip(ctx) {
                     return ExitHandlerResult::Error(e);
                 }
@@ -213,7 +229,7 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                         "HYPERCALL_REGISTER_FEEDBACK_BUFFER: buffer GVA translation failed gva={:#x} size={}\n",
                         gva, size
                     );
-                    ctx.state_mut().gprs.rax = !0u64;
+                    ctx.state_mut().gprs.rax = FB_ERR_BUFFER_NOT_RESIDENT;
                     if let Err(e) = advance_rip(ctx) {
                         return ExitHandlerResult::Error(e);
                     }
@@ -232,7 +248,7 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                     "HYPERCALL_REGISTER_FEEDBACK_BUFFER: all {} slots in use\n",
                     MAX_FEEDBACK_BUFFERS
                 );
-                ctx.state_mut().gprs.rax = !0u64;
+                ctx.state_mut().gprs.rax = FB_ERR_NO_SLOTS;
                 if let Err(e) = advance_rip(ctx) {
                     return ExitHandlerResult::Error(e);
                 }

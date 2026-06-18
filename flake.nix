@@ -141,28 +141,30 @@
           in "${vm}/bin/run-bedrock-vm-vm";
         };
 
-        # Integration tests in NixOS VM: nix run .#test
-        test = let
+        # NixOS-VM smoke test (nested virt): nix run .#test-vm
+        test-vm = let
           testDriver = import ./nix/tests.nix {
             inherit pkgs bedrockModule guestKernel guestInitrd;
             bedrockKernel = kernel;
             bedrockCli = userland.bedrock-cli;
             bedrockDeterminism = userland.bedrock-determinism;
-            bitcoinInitrd = workloadInitrds.bitcoinInitrd or null;
           };
         in {
           type = "app";
           program = "${testDriver}/bin/nixos-test-driver";
         };
 
-        # Native test (no NixOS VM, runs directly on host): nix run .#test-native
-        # Requires: host kernel 6.18 with bedrock module loaded, /dev/bedrock present
-        test-native = let
-          script = pkgs.writeShellScript "bedrock-test-native" ''
+        # Boot the bitcoin workload guest directly on the host:
+        #   nix run .#test-bitcoin-workload
+        # Requires: host kernel 6.18 with bedrock module loaded, /dev/bedrock
+        # present, and the bitcoin workload staged
+        # (git add -f workloads/bitcoin/images.tar) so the flake can see it.
+        test-bitcoin-workload = let
+          script = pkgs.writeShellScript "bedrock-test-bitcoin-workload" ''
             set -e
-            export PATH=${pkgs.lib.makeBinPath [ userland.bedrock-cli userland.bedrock-determinism pkgs.coreutils ]}:$PATH
+            export PATH=${pkgs.lib.makeBinPath [ userland.bedrock-cli pkgs.coreutils ]}:$PATH
 
-            echo "=== Bedrock native test ==="
+            echo "=== Bedrock bitcoin workload ==="
 
             # Check module is loaded
             if ! lsmod | grep -q bedrock; then
@@ -177,23 +179,82 @@
 
             echo "Module loaded, /dev/bedrock present"
 
-            # Boot trivial guest
-            echo "--- Booting trivial guest (VMCALL shutdown) ---"
-            bedrock-cli -m 5120 \
-              -i ${guestInitrd} \
-              ${guestKernel}/vmlinux \
-              --stop-at-vt 10.0 \
-              --wall-clock-timeout 300
-
-            echo "--- Trivial guest: OK ---"
-            ${pkgs.lib.optionalString (workloadInitrds ? bitcoinInitrd) ''
-              echo "--- Booting podman guest ---"
+            ${if (workloadInitrds ? bitcoinInitrd) then ''
+              echo "--- Booting bitcoin podman guest ---"
               bedrock-cli -m 5120 \
                 -i ${workloadInitrds.bitcoinInitrd} \
                 ${guestKernel}/vmlinux
-              echo "--- Podman guest: OK ---"
+              echo "--- Bitcoin guest: OK ---"
+            '' else ''
+              echo "ERROR: bitcoin workload images.tar not in the flake source." >&2
+              echo "Stage it first: git add -f workloads/bitcoin/images.tar" >&2
+              exit 1
             ''}
-            echo "=== All tests passed ==="
+            echo "=== Bitcoin workload: OK ==="
+          '';
+        in {
+          type = "app";
+          program = "${script}";
+        };
+
+        # bedrock-lab integration tests: nix run .#integration-tests
+        #
+        # The test binary is compiled hermetically by nix (cargo runs inside
+        # the build sandbox with its own CARGO_HOME, so it never touches the
+        # caller's ~/.cargo), then run on the host against a loaded bedrock
+        # module / /dev/bedrock. Like test-bitcoin-workload, the workload initrd
+        # is built by nix from the staged images.tar (stage it with
+        # `git add -f workloads/integration-tests/images.tar`); BEDROCK_VMLINUX
+        # and BEDROCK_INITRAMFS can override the guest kernel / initrd.
+        integration-tests = let
+          testBin = pkgs.rustPlatform.buildRustPackage {
+            pname = "bedrock-integration-tests-bin";
+            version = "0.1.0";
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter = path: type:
+                let baseName = builtins.baseNameOf path; in
+                !(baseName == "target" || baseName == ".git" ||
+                  baseName == ".claude" || baseName == "nix" ||
+                  (type == "directory" && baseName == "bedrock" &&
+                   builtins.match ".*/crates/bedrock$" path != null));
+            };
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.jq ];
+            # Compile the test harness but don't run it (there's no /dev/bedrock
+            # in the sandbox); install the resulting binary for the host to run.
+            buildPhase = ''
+              runHook preBuild
+              cargo test --no-run --release -p bedrock-integration-tests \
+                --message-format=json \
+                | jq -r 'select(.profile.test == true and .executable != null) | .executable' \
+                > test-bins
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 "$(head -n1 test-bins)" \
+                "$out/bin/bedrock-integration-tests"
+              runHook postInstall
+            '';
+            doCheck = false;
+          };
+          # Default the initrd to the nix-built workload (present when its
+          # images.tar is staged), exactly like test-bitcoin-workload.
+          defaultInitrd = workloadInitrds.integration-testsInitrd or null;
+          script = pkgs.writeShellScript "bedrock-integration-tests" ''
+            set -euo pipefail
+            export BEDROCK_VMLINUX="''${BEDROCK_VMLINUX:-${guestKernel}/vmlinux}"
+            ${pkgs.lib.optionalString (defaultInitrd != null)
+              ''export BEDROCK_INITRAMFS="''${BEDROCK_INITRAMFS:-${defaultInitrd}}"''}
+            if [ -z "''${BEDROCK_INITRAMFS:-}" ]; then
+              echo "ERROR: the integration-tests workload isn't staged and" >&2
+              echo "BEDROCK_INITRAMFS is unset. Stage its image so nix can build" >&2
+              echo "the initrd: git add -f workloads/integration-tests/images.tar" >&2
+              echo "(or set BEDROCK_INITRAMFS to a prebuilt initrd)." >&2
+              exit 1
+            fi
+            exec ${testBin}/bin/bedrock-integration-tests "$@"
           '';
         in {
           type = "app";

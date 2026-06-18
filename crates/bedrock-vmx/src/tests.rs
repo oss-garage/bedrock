@@ -689,8 +689,8 @@ fn test_vmcall_register_feedback_buffer_invalid_size() {
     // Should continue (error is reported via return value)
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // RAX should be -1 (failure)
-    assert_eq!(ctx.gprs().rax, !0u64);
+    // RAX carries the differentiated bad-size code.
+    assert_eq!(ctx.gprs().rax, crate::exits::FB_ERR_BAD_SIZE);
 
     // Feedback buffer should NOT be registered at index 0
     assert!(ctx.state().feedback_buffers[0].is_none());
@@ -718,10 +718,91 @@ fn test_vmcall_register_feedback_buffer_size_too_large() {
     // Should continue (error is reported via return value)
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // RAX should be -1 (failure)
-    assert_eq!(ctx.gprs().rax, !0u64);
+    // RAX carries the differentiated bad-size code.
+    assert_eq!(ctx.gprs().rax, crate::exits::FB_ERR_BAD_SIZE);
 
     // Feedback buffer should NOT be registered at index 0
+    assert!(ctx.state().feedback_buffers[0].is_none());
+}
+
+#[test]
+fn test_vmcall_register_feedback_buffer_bad_id_len() {
+    use crate::exits::FB_ERR_BAD_ID_LEN;
+    use crate::hypercalls::HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+
+    let mut ctx = MockVmContext::new();
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_guest_rip(0x1000);
+    ctx.set_instruction_len(3);
+
+    // Valid size, but id length 0 — rejected before any translation.
+    ctx.gprs_mut().rax = HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+    ctx.gprs_mut().rbx = 0x5000;
+    ctx.gprs_mut().rcx = 4096;
+    ctx.gprs_mut().rdx = 0x6000;
+    ctx.gprs_mut().rsi = 0; // invalid id length
+
+    let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+
+    assert_eq!(result, ExitHandlerResult::Continue);
+    assert_eq!(ctx.gprs().rax, FB_ERR_BAD_ID_LEN);
+    assert!(ctx.state().feedback_buffers[0].is_none());
+}
+
+#[test]
+fn test_vmcall_register_feedback_buffer_id_not_resident() {
+    use crate::exits::FB_ERR_ID_NOT_RESIDENT;
+    use crate::hypercalls::HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+
+    let mut ctx = MockVmContext::new();
+    install_identity_paging(&mut ctx); // maps only [0, 1GB)
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_guest_rip(0x1000);
+    ctx.set_instruction_len(3);
+
+    // Buffer is mapped, but the id pointer lands in the unmapped second 1GB
+    // region (PDPT[1] not present) — the id translation fails first.
+    ctx.gprs_mut().rax = HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+    ctx.gprs_mut().rbx = 0x5000; // mapped
+    ctx.gprs_mut().rcx = 4096;
+    ctx.gprs_mut().rdx = 0x4000_0000; // unmapped
+    ctx.gprs_mut().rsi = 8;
+
+    let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+
+    assert_eq!(result, ExitHandlerResult::Continue);
+    assert_eq!(ctx.gprs().rax, FB_ERR_ID_NOT_RESIDENT);
+    assert!(ctx.state().feedback_buffers[0].is_none());
+}
+
+#[test]
+fn test_vmcall_register_feedback_buffer_buffer_not_resident() {
+    use crate::exits::FB_ERR_BUFFER_NOT_RESIDENT;
+    use crate::hypercalls::HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+
+    let mut ctx = MockVmContext::new();
+    install_identity_paging(&mut ctx); // maps only [0, 1GB)
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_guest_rip(0x1000);
+    ctx.set_instruction_len(3);
+
+    // Id is mapped and resident; the buffer pointer is in the unmapped second
+    // 1GB region — the id reads fine, then the buffer translation fails.
+    let id_bytes = b"build-id-xyz";
+    ctx.memory[0x6000..0x6000 + id_bytes.len()].copy_from_slice(id_bytes);
+    ctx.gprs_mut().rax = HYPERCALL_REGISTER_FEEDBACK_BUFFER;
+    ctx.gprs_mut().rbx = 0x4000_0000; // unmapped
+    ctx.gprs_mut().rcx = 4096;
+    ctx.gprs_mut().rdx = 0x6000; // mapped id
+    ctx.gprs_mut().rsi = id_bytes.len() as u64;
+
+    let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+
+    assert_eq!(result, ExitHandlerResult::Continue);
+    assert_eq!(ctx.gprs().rax, FB_ERR_BUFFER_NOT_RESIDENT);
     assert!(ctx.state().feedback_buffers[0].is_none());
 }
 

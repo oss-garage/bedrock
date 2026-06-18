@@ -5,9 +5,10 @@ Nix flake for building and testing the bedrock hypervisor with nested KVM.
 ## Quick Start
 
 ```bash
-nix run .#vm            # Boot interactive dev VM (SSH on port 2222)
-nix run .#test          # Run integration tests in NixOS VM
-nix run .#test-native   # Run tests directly on host (faster, no nested virt)
+nix run .#vm                    # Boot interactive dev VM (SSH on port 2222)
+nix run .#test-vm               # NixOS-VM smoke test (nested virt)
+nix run .#test-bitcoin-workload # Boot the trivial + bitcoin guests on the host
+nix run .#integration-tests     # bedrock-lab integration suite (set BEDROCK_INITRAMFS)
 ```
 
 ## Packages
@@ -55,25 +56,27 @@ extra-sandbox-paths = /dev/kvm
   initrd builder itself does not need network access — it only consumes the
   `images.tar` you supply.
 - **`extra-sandbox-paths = /dev/kvm`**: Exposes KVM to the build sandbox so
-  `nix run .#test` can launch the NixOS test VM with hardware acceleration.
+  `nix run .#test-vm` can launch the NixOS test VM with hardware acceleration.
 
 Restart the daemon after changes: `systemctl restart nix-daemon`
 
-### For `nix run .#test` (NixOS VM tests)
+### For `nix run .#test-vm` (NixOS VM tests)
 
 - KVM-capable host with nested VMX support
 - KVM modules loaded (`kvm`, `kvm_intel`) -- bedrock must NOT be loaded
   (it owns VMX exclusively; unload with `rmmod bedrock` first)
 
-### For `nix run .#test-native` (bare-metal tests)
+### For `nix run .#test-bitcoin-workload` and `nix run .#integration-tests` (host tests)
 
 - Host kernel 6.18 with bedrock module loaded
 - `/dev/bedrock` device present
 - KVM must NOT be loaded (bedrock owns VMX)
+- `.#integration-tests` additionally needs `BEDROCK_INITRAMFS` pointing at the
+  integration-tests workload initrd (`just build-workload integration-tests`)
 
 ### For `nix run .#vm` (interactive dev VM)
 
-- Same as `nix run .#test` requirements
+- Same as `nix run .#test-vm` requirements
 - SSH into the VM: `ssh -p 2222 dev@localhost` (password: `dev`)
 - Root password: `root`
 
@@ -87,8 +90,10 @@ The flake pins:
 
 ## CI
 
-The `integration-tests.yml` workflow runs `nix run .#test` on a self-hosted
-runner. The runner needs the same host requirements listed above.
+The `nix.yml` workflow runs `nix run .#test-bitcoin-workload` (the "Run bitcoin
+workload" job) and `nix run .#integration-tests` (the "Integration tests" job)
+on self-hosted nested-virt runners. The runners need the same host requirements
+listed above.
 
 ## Podman Initrd
 

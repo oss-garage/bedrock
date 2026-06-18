@@ -17,6 +17,10 @@ __pycache__/
 result
 result-*
 
+# Workload container archives: built transiently by `just build-workload`
+# (staged with `git add -f` only for the duration of a nix build).
+workloads/*/images.tar
+
 # Kernel module build artifacts
 crates/bedrock/*.o
 crates/bedrock/*.ko

@@ -1,0 +1,25 @@
+[package]
+name = "bedrock-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-level integration tests for bedrock, driven through bedrock-lab"
+# Nothing to publish or install — this crate exists only to host the
+# integration-test binary below.
+publish = false
+
+# A single integration-test target so the guest boots exactly once per run:
+# cargo compiles each file under a `tests/` dir into its own binary (its own
+# process), which would re-boot the VM per file. Keeping every test in one
+# binary lets them share one lazily-booted ready checkpoint (see
+# integration/common.rs) and fork their own branches off it on parallel test
+# threads.
+[[test]]
+name = "integration"
+path = "integration/main.rs"
+harness = true
+
+[dev-dependencies]
+bedrock-lab = { path = "../crates/bedrock-lab" }
+bedrock-vm = { path = "../crates/bedrock-vm" }
+serde_json = "1"

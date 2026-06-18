@@ -104,6 +104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bedrock-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "bedrock-lab",
+ "bedrock-vm",
+ "serde_json",
+]
+
+[[package]]
 name = "bedrock-lab"
 version = "0.1.0"
 dependencies = [

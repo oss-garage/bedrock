@@ -81,12 +81,18 @@ build-workload name:
 vm:
     nix run .#vm
 
-# Run NixOS integration tests in VM (requires KVM, slow due to nested virt)
+# NixOS-VM smoke test (requires KVM, slow due to nested virt)
 [group: 'nix']
-nix-test:
-    nix run .#test
+nix-test-vm:
+    nix run .#test-vm
 
-# Run tests natively on host (requires bedrock module loaded)
+# Boot the trivial + bitcoin workload guests on the host (requires bedrock module loaded)
 [group: 'nix']
-nix-test-native:
-    nix run .#test-native
+nix-test-bitcoin-workload:
+    nix run .#test-bitcoin-workload
+
+# Run the bedrock-lab integration tests (requires bedrock module loaded and the
+# workload image staged: git add -f workloads/integration-tests/images.tar)
+[group: 'nix']
+nix-integration-tests:
+    nix run .#integration-tests

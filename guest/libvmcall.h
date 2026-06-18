@@ -96,6 +96,21 @@ typedef unsigned long long vmcall_u64;
 #define VMCALL_FEEDBACK_BUFFER_ID_MAX_LEN 64U
 
 /*
+ * Feedback buffer registration failure codes returned in RAX (mirror the
+ * FB_ERR_* constants in crates/bedrock-vmx/src/exits/vmcall.rs). On success
+ * the call returns the assigned slot index (0..MAX_FEEDBACK_BUFFERS-1), which
+ * can't collide with these. The _NOT_RESIDENT codes mean the passed page
+ * wasn't faulted in: the hypervisor translates the pointer by walking the
+ * guest page tables and can't fault a page in for you, so touch the buffer and
+ * id (and mlock the buffer) before registering.
+ */
+#define VMCALL_FB_ERR_BAD_SIZE VMCALL_ERR                  /* (u64)-1 */
+#define VMCALL_FB_ERR_BAD_ID_LEN (VMCALL_ERR - 1ULL)       /* (u64)-2 */
+#define VMCALL_FB_ERR_ID_NOT_RESIDENT (VMCALL_ERR - 2ULL)  /* (u64)-3 */
+#define VMCALL_FB_ERR_BUFFER_NOT_RESIDENT (VMCALL_ERR - 3ULL) /* (u64)-4 */
+#define VMCALL_FB_ERR_NO_SLOTS (VMCALL_ERR - 4ULL)         /* (u64)-5 */
+
+/*
  * PEBS registration failure codes returned in RAX (mirror
  * RegisterPebsPageResult in crates/bedrock-vmx/src/exits/pebs.rs).
  */
@@ -202,7 +217,12 @@ static inline void vmcall_ready(void)
 /*
  * Register a feedback buffer. `buf`/`size` describe the buffer; `id`/`id_len`
  * an identifier the host groups results under. Returns the assigned slot
- * index (>= 0) on success, or VMCALL_ERR on failure.
+ * index (>= 0) on success, or one of the VMCALL_FB_ERR_* codes on failure.
+ *
+ * `buf` and `id` must already be faulted-in (and `buf` should be mlock'd so it
+ * stays resident at a stable GPA): the hypervisor translates both by walking
+ * the guest page tables and rejects a not-present page with
+ * VMCALL_FB_ERR_BUFFER_NOT_RESIDENT / VMCALL_FB_ERR_ID_NOT_RESIDENT.
  */
 static inline vmcall_u64 vmcall_register_feedback_buffer(const void *buf,
 							 vmcall_u64 size,

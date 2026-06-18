@@ -1,0 +1,23 @@
+# Integration-tests workload: a single idle container that signals the
+# bedrock VM ready and then sleeps forever.
+#
+# The podman initrd (nix/podman-initrd.nix) loads bedrock-io.ko before
+# bringing this up, so once the container is running the deterministic I/O
+# channel is live and the lab can drive bash commands at `host` or at the
+# `idle` container. The container never shuts the VM down on its own — the
+# lab owns lifetime and tears the tree down when the test process exits.
+#
+# The image comes from images.tar (built by ./build.sh) — never pulled.
+
+services:
+  idle:
+    image: bedrock/integration-tests-ready:latest
+    pull_policy: never
+    container_name: idle
+    privileged: true  # Required for VMCALL
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /usr/local/bin/bedrock-ready
+        echo "integration-tests: ready signaled, idling"
+        sleep infinity

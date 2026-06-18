@@ -1,14 +1,15 @@
-# NixOS integration tests for bedrock.
+# NixOS-VM smoke test for bedrock.
 #
-# Run with: nix run .#test
+# Run with: nix run .#test-vm
+#
+# Boots a NixOS VM with the bedrock module loaded and confirms it can boot a
+# trivial guest (VMCALL shutdown) — a quick "does the hypervisor work in a
+# clean environment" check. The realistic bitcoin workload runs separately via
+# `nix run .#test-bitcoin-workload`.
 #
 # NOTE: Requires a KVM-capable host with nested VMX support.
-#
-# `bitcoinInitrd` is optional. When non-null, an extra step boots the podman
-# initrd to exercise the deterministic I/O channel. The flake passes it as
-# null whenever workloads/bitcoin/images.tar isn't in the flake source.
 { pkgs, bedrockKernel, bedrockModule, bedrockCli, bedrockDeterminism
-, guestKernel, guestInitrd, bitcoinInitrd ? null }:
+, guestKernel, guestInitrd }:
 
 let
   machineConfig = { config, pkgs, ... }: {
@@ -63,21 +64,6 @@ let
         " --wall-clock-timeout 300"
         " >&2"
       )
-      ${pkgs.lib.optionalString (bitcoinInitrd != null) ''
-        # Boot podman guest (runs workload, shuts down via VMCALL).
-        # `--io-action 'vt=100.0:rec:exec:host:podman ps'` exercises the
-        # deterministic I/O channel: at virtual-time 100s the host queues a
-        # bash command, the guest module receives the IRQ on pin 9, runs
-        # `podman ps`, records its combined output into the output feedback
-        # buffer (the `rec:` prefix), and the CLI prints the container names.
-        machine.succeed(
-          "bedrock-cli -m 5120"
-          " -i ${bitcoinInitrd}"
-          " --io-action 'vt=100.0:rec:exec:host:podman ps'"
-          " ${guestKernel}/vmlinux"
-          " >&2"
-        )
-      ''}
     '';
   };
 in
