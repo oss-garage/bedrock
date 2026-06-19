@@ -23,7 +23,7 @@ use zerocopy::FromBytes;
 use crate::ExitRecord;
 pub use bedrock_vmx::events::{
     EventCategories, EventHeader, EventKind, InjectPayload, IoChannelPayload, IoChannelPhase,
-    RandomPayload, EVENT_BUFFER_SIZE, EVENT_FLAG_DETERMINISTIC, EVENT_HEADER_SIZE,
+    RandomPayload, RandomSource, EVENT_BUFFER_SIZE, EVENT_FLAG_DETERMINISTIC, EVENT_HEADER_SIZE,
 };
 
 /// A decoded view of one record's payload.
@@ -34,8 +34,11 @@ pub enum Event<'a> {
     Serial(&'a [u8]),
     /// Injected interrupt.
     Inject(&'a InjectPayload),
-    /// Controlled-randomness value.
-    Randomness(&'a RandomPayload),
+    /// Controlled-randomness value: the fixed [`RandomPayload`] header plus, for
+    /// `GetRandom`, the served byte buffer (empty for RDRAND/RDSEED, whose value
+    /// is carried inline in the header). The payload's [`RandomSource`] says
+    /// which channel served it.
+    Randomness(&'a RandomPayload, &'a [u8]),
     /// I/O channel transaction: the fixed metadata plus the transaction's bytes
     /// (the injected request command, or the guest's response).
     IoChannel(&'a IoChannelPayload, &'a [u8]),
@@ -101,8 +104,10 @@ impl<'a> EventRecord<'a> {
                 }
             }
             k if k == EventKind::Randomness.as_u16() => {
+                // `ref_from_prefix` splits the fixed header from any trailing
+                // served bytes (GetRandom); the tail is empty for RDRAND/RDSEED.
                 match RandomPayload::ref_from_prefix(self.payload) {
-                    Ok((p, _)) => Event::Randomness(p),
+                    Ok((p, bytes)) => Event::Randomness(p, bytes),
                     Err(_) => Event::Malformed,
                 }
             }
@@ -127,10 +132,12 @@ impl<'a> EventRecord<'a> {
             Event::Exit(p) => EventBody::Exit(p),
             Event::Serial(bytes) => EventBody::Serial(String::from_utf8_lossy(bytes)),
             Event::Inject(p) => EventBody::Inject(p),
-            Event::Randomness(p) => EventBody::Randomness {
+            Event::Randomness(p, bytes) => EventBody::Randomness {
                 source: p.source,
                 width: p.width,
                 value: p.value,
+                pid: p.pid,
+                len: bytes.len(),
             },
             Event::IoChannel(p, data) => io_channel_body(p, data),
             Event::Unknown { kind, payload } => EventBody::Unknown {
@@ -254,13 +261,20 @@ pub enum EventBody<'a> {
     Inject(&'a InjectPayload),
     /// Controlled-randomness value (value rendered as hex).
     Randomness {
-        /// Source instruction (0 = RDRAND, 1 = RDSEED).
+        /// Source channel (0 = RDRAND, 1 = RDSEED, 2 = GET_RANDOM).
         source: u8,
-        /// Operand width in bytes.
+        /// Operand width in bytes (RDRAND/RDSEED; 0 for GET_RANDOM).
         width: u8,
-        /// Value handed to the guest, hex-encoded.
+        /// Value handed to the guest, hex-encoded (RDRAND/RDSEED; 0 for
+        /// GET_RANDOM, whose bytes are reported via `len`).
         #[serde(serialize_with = "hex")]
         value: u64,
+        /// Requesting PID (GET_RANDOM; 0 for RDRAND/RDSEED).
+        pid: u32,
+        /// Number of served bytes trailing the header (GET_RANDOM; 0 for
+        /// RDRAND/RDSEED). The bytes themselves are omitted to keep the log
+        /// compact.
+        len: usize,
     },
     /// I/O channel transaction. A request decodes into `target`/`command`/
     /// `record_output`; a response into `status`/`exit_code`/`output_len`; an

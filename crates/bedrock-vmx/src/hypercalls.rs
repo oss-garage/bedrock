@@ -179,3 +179,36 @@ pub const HYPERCALL_REGISTER_PEBS_PAGE: u64 = 3;
 /// runs entirely during the root VM's boot, before `HYPERCALL_READY`, so forked
 /// VMs inherit the already-populated filesystem and never re-fetch.
 pub const HYPERCALL_FILE_FETCH: u64 = 10;
+
+/// Fetch fuzzer-controlled random bytes for the guest.
+///
+/// Issued by the patched guest `get_random_bytes_user()` — the single
+/// chokepoint behind `/dev/urandom`, `/dev/random` and the `getrandom()`
+/// syscall — once per (chunked) read instead of trapping RDRAND. It hands the
+/// hypervisor the *size* of the request and the *PID* of the requesting
+/// process, both of which surface to the fuzzer, which a bare RDRAND trap
+/// cannot communicate.
+///
+/// Inputs:
+/// - RBX: Guest virtual address of the destination buffer.
+/// - RCX: Number of bytes requested (the hypervisor serves at most
+///   `RANDOM_REPLY_MAX`; the guest loops for larger reads).
+/// - RDX: PID (`current->tgid`) of the requesting process.
+///
+/// Outputs:
+/// - RAX: number of bytes written into the buffer, or `!0` on failure
+///   (GVA translation / guest-memory write failed).
+///
+/// Behaviour depends on the random device mode (configured together with
+/// RDRAND via `SET_RDRAND_CONFIG`):
+/// - **SeededRng**: the hypervisor fills the buffer from a deterministic in-VM
+///   xorshift PRNG and resumes — no userspace round-trip.
+/// - **ExitToUserspace**: the hypervisor records the request (buffer, length,
+///   PID) and exits to userspace as `ExitReason::VmcallGetRandom`. Userspace
+///   stages the reply bytes via `SET_RANDOM_BYTES` and re-runs; the handler then
+///   writes them into the guest buffer and resumes. Mirrors the RDRAND
+///   exit-to-userspace flow.
+///
+/// (Numbers 8/9 are the paravirtual console and 10 is `HYPERCALL_FILE_FETCH` on
+/// this branch, so this is 11.)
+pub const HYPERCALL_GET_RANDOM: u64 = 11;

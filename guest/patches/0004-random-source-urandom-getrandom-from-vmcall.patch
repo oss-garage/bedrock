@@ -1,0 +1,128 @@
+From: Bedrock <bedrock@example.com>
+Subject: [PATCH 4/4] random: source /dev/urandom & getrandom() from a VMCALL
+
+For deterministic fuzzing under bedrock, userspace randomness must be
+controllable byte-for-byte by the hypervisor, and the fuzzer benefits
+from knowing the size of each request and which process made it.
+/dev/urandom, /dev/random and the getrandom() syscall all funnel through
+get_random_bytes_user(), which normally fills the user buffer from the
+in-kernel ChaCha CRNG -- whose output is laundered through ChaCha, so a
+fuzzer mutation of a recorded value cannot move a specific byte, and the
+CRNG carries no notion of request size or PID.
+
+Replace the CRNG fill with a HYPERCALL_GET_RANDOM VMCALL (RAX=11) that
+hands the hypervisor the destination buffer, the requested length and the
+requesting PID (current->tgid). Bedrock serves the bytes from the
+fuzzer's input stream -- recording the size and PID -- and writes them
+straight into guest memory. Reads larger than the hypervisor's reply cap
+(256 bytes) are served in chunks. This supersedes the earlier
+RDRAND-based variant of this patch: one exit per read instead of
+ceil(len/8) RDRAND traps, and the fuzzer sees each read's size and PID.
+
+Signed-off-by: Bedrock <bedrock@example.com>
+---
+ drivers/char/random.c | 64 ++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 48 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index b8b24b6ed..66810722e 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -439,40 +439,64 @@ void get_random_bytes(void *buf, size_t len)
+ }
+ EXPORT_SYMBOL(get_random_bytes);
+ 
++/*
++ * Bedrock determinism: HYPERCALL_GET_RANDOM (VMCALL with RAX=11). Asks the
++ * hypervisor to fill `buf` (a kernel virtual address) with `len` bytes of
++ * fuzzer-controlled randomness on behalf of process `pid`, returning the number
++ * of bytes written. Bedrock traps the VMCALL, serves the bytes from the
++ * fuzzer's input stream -- recording the request's size and PID -- and writes
++ * them straight into guest memory. RBX/RCX/RDX carry buf/len/pid.
++ */
++#define BEDROCK_HYPERCALL_GET_RANDOM	11UL
++/* Must match bedrock's RANDOM_REPLY_MAX: the hypervisor caps each reply at this
++ * many bytes, so larger reads are served in chunks of this size. */
++#define BEDROCK_RANDOM_REPLY_MAX	256
++
++static inline unsigned long bedrock_get_random(void *buf, unsigned long len,
++					       unsigned long pid)
++{
++	unsigned long ret;
++
++	asm volatile("vmcall"
++		     : "=a"(ret)
++		     : "a"(BEDROCK_HYPERCALL_GET_RANDOM),
++		       "b"((unsigned long)buf), "c"(len), "d"(pid)
++		     : "memory");
++	return ret;
++}
++
+ static ssize_t get_random_bytes_user(struct iov_iter *iter)
+ {
+-	struct chacha_state chacha_state;
+-	u8 block[CHACHA_BLOCK_SIZE];
++	u8 block[BEDROCK_RANDOM_REPLY_MAX];
+ 	size_t ret = 0, copied;
+ 
+ 	if (unlikely(!iov_iter_count(iter)))
+ 		return 0;
+ 
+ 	/*
+-	 * Immediately overwrite the ChaCha key at index 4 with random
+-	 * bytes, in case userspace causes copy_to_iter() below to sleep
+-	 * forever, so that we still retain forward secrecy in that case.
+-	 */
+-	crng_make_state(&chacha_state, (u8 *)&chacha_state.x[4],
+-			CHACHA_KEY_SIZE);
+-	/*
+-	 * However, if we're doing a read of len <= 32, we don't need to
+-	 * use chacha_state after, so we can simply return those bytes to
+-	 * the user directly.
++	 * Bedrock determinism: serve all userspace randomness via
++	 * HYPERCALL_GET_RANDOM (a VMCALL) instead of the in-kernel ChaCha CRNG.
++	 * /dev/urandom, /dev/random and the getrandom() syscall all funnel
++	 * through this function. The hypervisor returns exactly the bytes the
++	 * fuzzer chose, recording each request's size and the requesting PID --
++	 * so the bytes handed to userspace are fuzzer-controlled and replay
++	 * deterministically, and the fuzzer learns how much entropy each process
++	 * consumed (neither of which a CRNG seeded from RDRAND can offer).
+ 	 */
+-	if (iov_iter_count(iter) <= CHACHA_KEY_SIZE) {
+-		ret = copy_to_iter(&chacha_state.x[4], CHACHA_KEY_SIZE, iter);
+-		goto out_zero_chacha;
+-	}
+-
+ 	for (;;) {
+-		chacha20_block(&chacha_state, block);
+-		if (unlikely(chacha_state.x[12] == 0))
+-			++chacha_state.x[13];
++		size_t want = min_t(size_t, iov_iter_count(iter), sizeof(block));
++		size_t got = bedrock_get_random(block, want, current->tgid);
++
++		/*
++		 * The hypervisor returns ~0UL on failure (and never more than it
++		 * was asked for); bail rather than copy garbage.
++		 */
++		if (unlikely(got == 0 || got > sizeof(block)))
++			break;
+ 
+-		copied = copy_to_iter(block, sizeof(block), iter);
++		copied = copy_to_iter(block, got, iter);
+ 		ret += copied;
+-		if (!iov_iter_count(iter) || copied != sizeof(block))
++		if (!iov_iter_count(iter) || copied != got)
+ 			break;
+ 
+ 		BUILD_BUG_ON(PAGE_SIZE % sizeof(block) != 0);
+@@ -484,8 +508,6 @@ static ssize_t get_random_bytes_user(struct iov_iter *iter)
+ 	}
+ 
+ 	memzero_explicit(block, sizeof(block));
+-out_zero_chacha:
+-	chacha_zeroize_state(&chacha_state);
+ 	return ret ? ret : -EFAULT;
+ }
+ 
+--
+2.39.0

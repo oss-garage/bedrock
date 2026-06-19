@@ -3,14 +3,14 @@
 //! RDRAND/RDSEED VM exit handlers.
 //!
 //! These handlers emulate the RDRAND and RDSEED instructions based on the
-//! configured emulation mode in the VM's RdrandState.
+//! configured emulation mode in the VM's RandomState.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
-use super::helpers::{advance_rip, ExitError, ExitHandlerResult};
+use super::helpers::{advance_rip, emit_randomness_event, ExitError, ExitHandlerResult};
 use super::qualifications::{RdrandInstructionInfo, RdrandOperandSize};
 use super::reasons::ExitReason;
 
@@ -102,7 +102,7 @@ fn set_cf_flag<C: VmContext>(ctx: &mut C, cf: bool) -> Result<(), ExitError> {
 
 /// Handle RDRAND VM exit.
 ///
-/// Emulates the RDRAND instruction based on the VM's RdrandState configuration.
+/// Emulates the RDRAND instruction based on the VM's RandomState configuration.
 /// Returns a generated random value and advances RIP on success.
 /// If the mode is ExitToUserspace and no pending value is available,
 /// exits to userspace to let it provide the value.
@@ -119,24 +119,23 @@ fn handle_random<C: VmContext>(ctx: &mut C, source: RandomSource) -> ExitHandler
     };
 
     // Check if we need to exit to userspace (ExitToUserspace mode without pending value)
-    if ctx.state().devices.rdrand.needs_userspace_exit() {
+    if ctx.state().devices.random.needs_rdrand_exit() {
         // Don't advance RIP - userspace will provide the value and we'll re-execute
         return ExitHandlerResult::ExitToUserspace(ExitReason::Rdrand);
     }
 
     // Generate the random value
-    let value = match ctx.state_mut().devices.rdrand.generate() {
+    let value = match ctx.state_mut().devices.random.generate() {
         Some(v) => v,
         None => {
-            // This shouldn't happen if needs_userspace_exit() was checked above
+            // This shouldn't happen if needs_rdrand_exit() was checked above
             return ExitHandlerResult::ExitToUserspace(ExitReason::Rdrand);
         }
     };
 
-    // Record the served value as a determinism *input* on the event stream. It
-    // is its own category so it can be captured on a normal run without the
-    // heavyweight `Exit` capture. Buffer-full is handled centrally by the exit
-    // dispatcher (`event_buffer_full`), so the return value is ignored here.
+    // Record the served value as a determinism *input* on the unified
+    // randomness event stream (RDRAND/RDSEED carry the value inline; no trailing
+    // bytes). Same emit path as HYPERCALL_GET_RANDOM — only the source differs.
     let width: u8 = match info.operand_size {
         RdrandOperandSize::Size16 => 2,
         RdrandOperandSize::Size32 => 4,
@@ -146,11 +145,9 @@ fn handle_random<C: VmContext>(ctx: &mut C, source: RandomSource) -> ExitHandler
         value,
         source: source as u8,
         width,
-        _pad: [0; 6],
+        ..RandomPayload::default()
     };
-    let _ = ctx
-        .state_mut()
-        .event_append(EventKind::Randomness, payload.as_bytes());
+    emit_randomness_event(ctx, &payload, &[]);
 
     // Write the value to the destination register
     write_gpr_by_index(

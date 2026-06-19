@@ -101,10 +101,13 @@ pub enum EventKind {
     /// An interrupt injected into the guest. Payload = [`InjectPayload`]. Timer
     /// now; extensible to other emulated lines (serial THRE IRQ, etc.).
     Inject = 2,
-    /// A controlled-randomness value served to the guest on an RDRAND/RDSEED
-    /// exit. Payload = [`RandomPayload`]. Its own category so it can be captured
-    /// on normal runs without enabling the firehose `Exit` capture — it is a
-    /// determinism *input*.
+    /// A controlled-randomness value served to the guest. Payload =
+    /// [`RandomPayload`] (whose [`RandomSource`] says which channel: RDRAND,
+    /// RDSEED, or the `HYPERCALL_GET_RANDOM` `/dev/urandom` / `getrandom()`
+    /// chokepoint), optionally followed by the served byte buffer (GET_RANDOM
+    /// only; RDRAND/RDSEED carry their value inline in the payload). Its own
+    /// category so it can be captured on normal runs without enabling the
+    /// firehose `Exit` capture — it is a determinism *input*.
     Randomness = 3,
     /// I/O channel transaction: request signaled + response delivered. Payload =
     /// [`IoChannelPayload`]. Its own category for the same reason as
@@ -190,14 +193,33 @@ impl InjectPayload {
     }
 }
 
-/// Which instruction a controlled-randomness value was served to.
+/// Which channel a controlled-randomness value was served on. All three are
+/// determinism *inputs* recorded on the unified [`EventKind::Randomness`]
+/// stream; the source lets a consumer tell them apart without separate event
+/// kinds.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RandomSource {
-    /// RDRAND.
+    /// RDRAND instruction. Value carried inline in [`RandomPayload::value`].
     Rdrand = 0,
-    /// RDSEED.
+    /// RDSEED instruction. Value carried inline in [`RandomPayload::value`].
     Rdseed = 1,
+    /// `HYPERCALL_GET_RANDOM` (the guest `/dev/urandom` / `getrandom()`
+    /// chokepoint). The served bytes follow the [`RandomPayload`] header and the
+    /// requesting process is in [`RandomPayload::pid`]; `value`/`width` are 0.
+    GetRandom = 2,
+}
+
+impl RandomSource {
+    /// Decode the `source` byte of a [`RandomPayload`]; unknown values fall back
+    /// to [`Rdrand`](Self::Rdrand).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            x if x == Self::Rdseed as u8 => Self::Rdseed,
+            x if x == Self::GetRandom as u8 => Self::GetRandom,
+            _ => Self::Rdrand,
+        }
+    }
 }
 
 /// Payload for an [`EventKind::Randomness`] record.
@@ -209,15 +231,19 @@ pub enum RandomSource {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct RandomPayload {
-    /// Value handed back to the guest.
+    /// Value handed back to the guest for RDRAND/RDSEED. Unused (0) for
+    /// `GetRandom`, whose served bytes follow the header instead.
     pub value: u64,
+    /// Requesting process (`current->tgid`) for `GetRandom`. 0 for RDRAND/RDSEED
+    /// (served at an instruction exit with no process context).
+    pub pid: u32,
     /// [`RandomSource`] as `u8`.
     pub source: u8,
-    /// Operand width in bytes (2/4/8: RDRAND r16/r32/r64).
+    /// Operand width in bytes (2/4/8: RDRAND r16/r32/r64). 0 for `GetRandom`.
     pub width: u8,
     /// Explicit padding (zeroed).
     #[cfg_attr(feature = "cargo", serde(skip))]
-    pub _pad: [u8; 6],
+    pub _pad: [u8; 2],
 }
 const _: () = assert!(core::mem::size_of::<RandomPayload>() == 16);
 

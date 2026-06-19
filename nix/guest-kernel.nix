@@ -1,7 +1,8 @@
 # Guest kernel for running under the bedrock hypervisor.
 #
-# Same Linux 6.18 base as the host kernel, but with determinism patches
-# applied (TLB flush fixes for VPID). No CONFIG_RUST needed.
+# Same Linux 6.18 base as the host kernel, but with determinism patches applied
+# (TLB flush fixes for VPID, and sourcing userspace randomness from a VMCALL).
+# No CONFIG_RUST needed.
 { pkgs
 , linux-src
 }:
@@ -20,6 +21,9 @@ let
       ../guest/patches/0001-x86-mm-force-tlb-flush-on-pte-flag-change.patch
       ../guest/patches/0002-x86-mm-make-flush_tlb_fix_spurious_fault-flush.patch
       ../guest/patches/0003-x86-mm-force-tlb-flush-on-pmd-flag-change.patch
+      # Source /dev/urandom, /dev/random and getrandom() from HYPERCALL_GET_RANDOM
+      # (RAX=11) so guest userspace randomness is fuzzer-controlled and recorded.
+      ../guest/patches/0004-random-source-urandom-getrandom-from-vmcall.patch
     ];
   };
 

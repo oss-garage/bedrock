@@ -47,6 +47,11 @@ pub enum ExitKind {
     Rdrand,
     /// RDSEED instruction (ExitToUserspace mode).
     Rdseed,
+    /// Guest requested random bytes via `HYPERCALL_GET_RANDOM` and the random
+    /// device is in ExitToUserspace mode. Userspace reads the pending request
+    /// (PID + length) via `Vm::random_request()`, stages the reply bytes with
+    /// `Vm::set_random_bytes()`, and runs again.
+    VmcallGetRandom,
     /// Event buffer is full - userspace must drain it, then call run() again.
     EventBufferFull,
     /// Guest requested the next chunk of a host-side file (`HYPERCALL_FILE_FETCH`).
@@ -132,6 +137,7 @@ impl VmExit {
             266 => "VMCALL_READY",
             267 => "EVENT_BUFFER_FULL",
             268 => "VMCALL_FILE_FETCH",
+            269 => "VMCALL_GET_RANDOM",
             _ => "UNKNOWN",
         }
     }
@@ -151,6 +157,7 @@ impl VmExit {
             61 => ExitKind::Rdseed,
             267 => ExitKind::EventBufferFull,
             268 => ExitKind::FileFetch,
+            269 => ExitKind::VmcallGetRandom,
             // Continuable: preemption timer, need_resched, mwait, monitor,
             // I/O instruction, pool exhausted, PEBS scratch-page registration,
             // I/O channel page registration (no userspace action needed —

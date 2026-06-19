@@ -14,7 +14,7 @@
 use std::fs::File;
 use std::io::Read;
 
-use bedrock_vm::events::IoChannelPhase;
+use bedrock_vm::events::{IoChannelPhase, RandomSource};
 use bedrock_vm::io_channel::{decode_request, IoTarget};
 use bedrock_vm::{Event, EventRecord};
 
@@ -36,13 +36,24 @@ pub struct IoInput {
     pub record_output: bool,
 }
 
-/// One RDRAND/RDSEED value fed to a branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RngInput {
-    /// Virtual time at which the value was fed.
+/// One controlled-randomness value fed to a branch — whatever the guest pulled
+/// from any randomness channel: an RDRAND/RDSEED instruction value or a
+/// `HYPERCALL_GET_RANDOM` (`/dev/urandom` / `getrandom()`) reply. One type for
+/// all of them; [`source`](Self::source) says which channel and the served
+/// [`bytes`](Self::bytes) are the payload (for RDRAND/RDSEED, the value's
+/// little-endian bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RandomInput {
+    /// Virtual time at which the bytes were served.
     pub at: VirtTime,
-    /// Value returned to the guest instruction.
-    pub value: u64,
+    /// Which channel served it (RDRAND, RDSEED, or GET_RANDOM).
+    pub source: RandomSource,
+    /// PID (`current->tgid`) of the requesting process for GET_RANDOM; 0 for
+    /// RDRAND/RDSEED (served at an instruction exit, no process context).
+    pub pid: u32,
+    /// Bytes handed to the guest. For GET_RANDOM, the served buffer; for
+    /// RDRAND/RDSEED, the instruction value's little-endian bytes.
+    pub bytes: Vec<u8>,
 }
 
 /// Inputs consumed by a branch, suitable for replay.
@@ -55,7 +66,7 @@ pub struct RngInput {
 /// stream is therefore the single source of truth for what reached the guest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InputRecording {
-    rng_inputs: Vec<RngInput>,
+    random_inputs: Vec<RandomInput>,
     io_inputs: Vec<IoInput>,
 }
 
@@ -65,9 +76,11 @@ impl InputRecording {
         Self::default()
     }
 
-    /// RDRAND/RDSEED values fed to the branch, in consumption order.
-    pub fn rng_inputs(&self) -> &[RngInput] {
-        &self.rng_inputs
+    /// Controlled-randomness values fed to the branch — RDRAND, RDSEED and
+    /// `HYPERCALL_GET_RANDOM` replies in one stream, in consumption order. Tell
+    /// them apart by [`RandomInput::source`].
+    pub fn random_inputs(&self) -> &[RandomInput] {
+        &self.random_inputs
     }
 
     /// I/O actions queued from the branch's [`InputSource`], in queue order.
@@ -77,9 +90,10 @@ impl InputRecording {
 
     /// Extract the determinism *input* carried by one event-stream record and
     /// append it to the recording. A [`Randomness`](bedrock_vm::Event::Randomness)
-    /// record yields one [`RngInput`]; an [`IoChannel`](bedrock_vm::Event::IoChannel)
-    /// *request* yields one [`IoInput`]. Every other kind — including I/O channel
-    /// *responses*, which carry host-derived output — is ignored.
+    /// record (RDRAND, RDSEED, or GET_RANDOM) yields one [`RandomInput`]; an
+    /// [`IoChannel`](bedrock_vm::Event::IoChannel) *request* yields one
+    /// [`IoInput`]. Every other kind — including I/O channel *responses*, which
+    /// carry host-derived output — is ignored.
     ///
     /// `freq` converts the record's emulated-TSC timestamp into [`VirtTime`].
     /// For I/O the record's own emit TSC (the moment the request was signaled to
@@ -88,10 +102,24 @@ impl InputRecording {
     /// emit TSC is the point a replay must stop at to re-inject the command.
     pub(crate) fn record_event(&mut self, record: &EventRecord<'_>, freq: u64) {
         match record.event() {
-            Event::Randomness(p) => self.rng_inputs.push(RngInput {
-                at: VirtTime::from_instructions(record.tsc(), freq),
-                value: p.value,
-            }),
+            // One unified randomness stream. RDRAND/RDSEED carry their value
+            // inline (stored as its little-endian bytes); GET_RANDOM carries the
+            // served buffer + the requesting PID.
+            Event::Randomness(p, bytes) => {
+                let at = VirtTime::from_instructions(record.tsc(), freq);
+                let source = RandomSource::from_u8(p.source);
+                let (pid, bytes) = if source == RandomSource::GetRandom {
+                    (p.pid, bytes.to_vec())
+                } else {
+                    (0, p.value.to_le_bytes().to_vec())
+                };
+                self.random_inputs.push(RandomInput {
+                    at,
+                    source,
+                    pid,
+                    bytes,
+                });
+            }
             Event::IoChannel(meta, data) if meta.phase == IoChannelPhase::Request as u8 => {
                 let Some(req) = decode_request(data) else {
                     return;
@@ -115,7 +143,9 @@ impl InputRecording {
 #[derive(Debug, Clone)]
 pub struct RecordedInputSource {
     recording: InputRecording,
-    rng_pos: usize,
+    /// Cursor into the one randomness stream, shared by RDRAND/RDSEED and
+    /// GET_RANDOM replay so the values come back in the exact recorded order.
+    random_pos: usize,
     io_pos: usize,
 }
 
@@ -124,7 +154,7 @@ impl RecordedInputSource {
     pub fn new(recording: InputRecording) -> Self {
         Self {
             recording,
-            rng_pos: 0,
+            random_pos: 0,
             io_pos: 0,
         }
     }
@@ -166,6 +196,23 @@ pub trait InputSource: Send + Sync {
     /// returned, future calls should keep returning `None`.
     fn next_rng_u64(&mut self) -> Option<u64>;
 
+    /// Serve the bytes for one `HYPERCALL_GET_RANDOM` request of `len` bytes from
+    /// process `pid` (the guest's `/dev/urandom` / `getrandom()` path). Must
+    /// always return exactly `len` bytes.
+    ///
+    /// The default synthesizes them from [`next_rng_u64`](Self::next_rng_u64) so
+    /// any RNG source works unchanged; sources that record/replay exact byte
+    /// streams (or want to steer per-PID) override it.
+    fn next_random(&mut self, len: usize, _pid: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            let v = self.next_rng_u64().unwrap_or(0);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+
     /// Pull the next I/O input from the source.
     ///
     /// Return `None` to signal that no more I/O input is available from this
@@ -197,11 +244,30 @@ impl Clone for Box<dyn InputSource> {
 
 impl InputSource for RecordedInputSource {
     fn next_rng_u64(&mut self) -> Option<u64> {
-        let input = self.recording.rng_inputs.get(self.rng_pos);
-        if input.is_some() {
-            self.rng_pos += 1;
-        }
-        input.map(|entry| entry.value)
+        // Pull the next entry of the one randomness stream and reconstruct the
+        // instruction value from its little-endian bytes. `None` past the
+        // recording signals exhaustion (the lab surfaces `RngExhausted`).
+        let input = self.recording.random_inputs.get(self.random_pos)?;
+        self.random_pos += 1;
+        let mut buf = [0u8; 8];
+        let n = input.bytes.len().min(8);
+        buf[..n].copy_from_slice(&input.bytes[..n]);
+        Some(u64::from_le_bytes(buf))
+    }
+
+    fn next_random(&mut self, len: usize, _pid: u32) -> Vec<u8> {
+        // Serve the recorded reply for this slot of the same stream; zero-fill
+        // past the recording (and top up a recorded reply shorter than now asked
+        // for) so replay stays deterministic. Always returns exactly `len` bytes.
+        let mut bytes = self
+            .recording
+            .random_inputs
+            .get(self.random_pos)
+            .map(|input| input.bytes.clone())
+            .unwrap_or_default();
+        self.random_pos += 1;
+        bytes.resize(len, 0);
+        bytes
     }
 
     fn next_io_input(&mut self) -> Option<IoInput> {

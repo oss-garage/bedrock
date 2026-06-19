@@ -64,6 +64,41 @@ pub(crate) const BEDROCK_VM_DRAIN_IO_RESPONSE: u32 =
 pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u32 =
     _IOW::<BedrockEventConfig>(BEDROCK_IOC_MAGIC, 13);
 
+/// Ioctl number for GET_RANDOM_REQUEST command - read the pending
+/// `HYPERCALL_GET_RANDOM` request (requesting PID + byte count).
+pub(crate) const BEDROCK_VM_GET_RANDOM_REQUEST: u32 =
+    _IOR::<BedrockRandomRequest>(BEDROCK_IOC_MAGIC, 14);
+
+/// Ioctl number for SET_RANDOM_BYTES command - stage the reply bytes for the
+/// pending `HYPERCALL_GET_RANDOM` request.
+pub(crate) const BEDROCK_VM_SET_RANDOM_BYTES: u32 =
+    _IOW::<BedrockRandomBytes>(BEDROCK_IOC_MAGIC, 15);
+
+/// Mirror of `bedrock_vmx::RANDOM_REPLY_MAX`. Wire-ABI constant — keep in
+/// lockstep with the userland `RandomBytes` (in `bedrock-vm`).
+pub(crate) const BEDROCK_RANDOM_REPLY_MAX: usize = 256;
+
+/// Pending `HYPERCALL_GET_RANDOM` request returned to userspace, so it can size
+/// the reply and attribute the request to a process.
+#[repr(C)]
+pub(crate) struct BedrockRandomRequest {
+    /// PID (`current->tgid`) of the requesting process.
+    pub pid: u32,
+    /// Bytes requested (already capped at `BEDROCK_RANDOM_REPLY_MAX`).
+    pub len: u32,
+}
+
+/// Reply bytes staged by userspace to satisfy the pending request.
+#[repr(C)]
+pub(crate) struct BedrockRandomBytes {
+    /// Number of valid bytes in `data` (capped at `BEDROCK_RANDOM_REPLY_MAX`).
+    pub len: u32,
+    /// Reserved for alignment.
+    pub _reserved: u32,
+    /// Reply bytes.
+    pub data: [u8; BEDROCK_RANDOM_REPLY_MAX],
+}
+
 /// Maximum I/O channel payload size (one 4KB page).
 pub(crate) const BEDROCK_IO_CHANNEL_BUF_SIZE: usize = 4096;
 

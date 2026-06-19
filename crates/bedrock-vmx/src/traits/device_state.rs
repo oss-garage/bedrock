@@ -27,8 +27,9 @@ pub struct DeviceStates {
     pub rtc: RtcState,
     /// Memory Type Range Registers state.
     pub mtrr: MtrrState,
-    /// RDRAND instruction emulation state.
-    pub rdrand: RdrandState,
+    /// Controlled-randomness device: RDRAND, RDSEED, and the
+    /// `HYPERCALL_GET_RANDOM` (`/dev/urandom` / `getrandom()`) chokepoint.
+    pub random: RandomState,
 }
 
 impl DeviceStates {
@@ -40,7 +41,7 @@ impl DeviceStates {
             ioapic: IoApicState::default(),
             rtc: RtcState::default(),
             mtrr: MtrrState::default(),
-            rdrand: RdrandState::default(),
+            random: RandomState::default(),
         }
     }
 }

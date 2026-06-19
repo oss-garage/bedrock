@@ -218,6 +218,11 @@ pub enum ExitReason {
     /// is how the guest downloads the workload's `compose.yaml` / `images.tar`
     /// at boot.
     VmcallFileFetch = 268,
+    /// VMCALL hypercall: guest requested random bytes via `HYPERCALL_GET_RANDOM`
+    /// (RAX=11) and the random device is in ExitToUserspace mode. Userspace reads
+    /// the pending request (PID + length) via `GET_RANDOM_REQUEST`, stages the
+    /// reply bytes with `SET_RANDOM_BYTES`, and re-runs.
+    VmcallGetRandom = 269,
 }
 
 /// Error when converting from raw exit reason value.

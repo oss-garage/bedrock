@@ -92,6 +92,27 @@ pub fn advance_rip<C: VmContext>(ctx: &mut C) -> Result<(), ExitError> {
     Ok(())
 }
 
+/// Record one controlled-randomness value on the unified event stream.
+///
+/// The single emit path shared by RDRAND/RDSEED (`source` carries the value
+/// inline in the [`RandomPayload`], `bytes` empty) and `HYPERCALL_GET_RANDOM`
+/// (`source = GetRandom`, the served buffer in `bytes` trailing the header). One
+/// [`EventKind::Randomness`] record, source-labelled — there is no separate
+/// event kind per randomness channel.
+///
+/// A full event buffer is handled centrally by the exit dispatcher, so the
+/// append result is ignored (as elsewhere for randomness records).
+pub fn emit_randomness_event<C: VmContext>(ctx: &mut C, payload: &RandomPayload, bytes: &[u8]) {
+    let header = payload.as_bytes();
+    let n = bytes.len().min(RANDOM_REPLY_MAX);
+    let mut buf = [0u8; core::mem::size_of::<RandomPayload>() + RANDOM_REPLY_MAX];
+    buf[..header.len()].copy_from_slice(header);
+    buf[header.len()..header.len() + n].copy_from_slice(&bytes[..n]);
+    let _ = ctx
+        .state_mut()
+        .event_append(EventKind::Randomness, &buf[..header.len() + n]);
+}
+
 /// Inject an exception into the guest.
 pub fn inject_exception<C: VmContext>(
     ctx: &mut C,

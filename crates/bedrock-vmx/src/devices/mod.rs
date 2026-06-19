@@ -9,13 +9,13 @@
 mod apic;
 mod ioapic;
 mod mtrr;
-mod rdrand;
+mod random;
 mod rtc;
 mod serial;
 
 pub use apic::{ApicState, APIC_BASE_DEFAULT};
 pub use ioapic::{IoApicState, IOAPIC_NUM_PINS};
 pub use mtrr::{MtrrState, MTRR_VAR_MAX};
-pub use rdrand::{RdrandMode, RdrandState};
+pub use random::{RandomState, RdrandMode, RANDOM_REPLY_MAX};
 pub use rtc::RtcState;
 pub use serial::SerialState;

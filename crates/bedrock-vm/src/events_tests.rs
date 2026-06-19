@@ -113,7 +113,7 @@ fn inject_random_iochannel_roundtrip() {
         value: 0xDEAD_BEEF_CAFE_F00D,
         source: RandomSource::Rdseed as u8,
         width: 8,
-        _pad: [0; 6],
+        ..RandomPayload::default()
     };
     push_record(
         &mut buf,
@@ -154,10 +154,11 @@ fn inject_random_iochannel_roundtrip() {
         _ => panic!("expected Inject"),
     }
     match recs[1].event() {
-        Event::Randomness(p) => {
+        Event::Randomness(p, bytes) => {
             assert_eq!(p.value, 0xDEAD_BEEF_CAFE_F00D);
             assert_eq!(p.source, RandomSource::Rdseed as u8);
             assert_eq!(p.width, 8);
+            assert!(bytes.is_empty(), "RDRAND/RDSEED carry no trailing bytes");
         }
         _ => panic!("expected Randomness"),
     }
@@ -211,7 +212,7 @@ fn jsonl_output_renders_kinds() {
         value: 0x1234,
         source: RandomSource::Rdrand as u8,
         width: 4,
-        _pad: [0; 6],
+        ..RandomPayload::default()
     };
     push_record(
         &mut buf,
@@ -271,7 +272,7 @@ fn filtered_jsonl_keeps_only_category() {
         value: 1,
         source: 0,
         width: 4,
-        _pad: [0; 6],
+        ..RandomPayload::default()
     };
     push_record(
         &mut buf,

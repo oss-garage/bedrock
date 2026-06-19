@@ -222,12 +222,14 @@ fn print_action_response(branch: BranchId, at: VirtTime, out: BashOutput) {
 
 fn print_input_recording(recording: &bedrock_lab::InputRecording) {
     println!("input recording:");
-    println!("  rng values: {}", recording.rng_inputs().len());
-    for (i, input) in recording.rng_inputs().iter().enumerate() {
+    println!("  randomness inputs: {}", recording.random_inputs().len());
+    for (i, input) in recording.random_inputs().iter().enumerate() {
         println!(
-            "    {i:04}: vt {:>8.3} value {:#018x}",
+            "    {i:04}: vt {:>8.3} source {:?} pid {} {} bytes",
             input.at.as_secs_f64(),
-            input.value
+            input.source,
+            input.pid,
+            input.bytes.len(),
         );
     }
 

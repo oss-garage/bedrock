@@ -179,7 +179,7 @@ fn typed_payloads_roundtrip() {
         value: 0x0123_4567_89AB_CDEF,
         source: RandomSource::Rdrand as u8,
         width: 4,
-        _pad: [0; 6],
+        ..RandomPayload::default()
     };
     assert!(ctx
         .state_mut()

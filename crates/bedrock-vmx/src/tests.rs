@@ -1363,3 +1363,262 @@ fn test_vmcall_serial_write_not_registered() {
         "no Serial event emitted on failure"
     );
 }
+
+// =============================================================================
+// HYPERCALL_GET_RANDOM (guest /dev/urandom / getrandom() chokepoint)
+// =============================================================================
+
+/// Reproduce the SeededRng fill the `HYPERCALL_GET_RANDOM` handler performs, so
+/// a test can assert the exact bytes a freshly-seeded device hands the guest.
+fn expected_seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
+    use crate::devices::{RandomState, RdrandMode};
+    let mut dev = RandomState::default();
+    dev.configure(RdrandMode::SeededRng, seed);
+    let mut out = Vec::new();
+    while out.len() < n {
+        out.extend_from_slice(&dev.next_seeded_u64().to_le_bytes());
+    }
+    out.truncate(n);
+    out
+}
+
+/// SeededRng mode: the handler fills the guest buffer from the in-VM PRNG with
+/// no userspace round-trip, returns the byte count in RAX, advances RIP, and
+/// records the served bytes (PID + bytes) on the unified event stream. The bytes
+/// are exactly the device's xorshift stream, and identical for an identically
+/// seeded VM — the determinism contract for guest userspace randomness.
+#[test]
+fn test_vmcall_get_random_seeded_fills_buffer_and_records_event() {
+    use crate::devices::RdrandMode;
+    use crate::events::{
+        EventCategories, EventKind, RandomPayload, RandomSource, EVENT_BUFFER_SIZE,
+        EVENT_HEADER_SIZE,
+    };
+    use crate::hypercalls::HYPERCALL_GET_RANDOM;
+
+    const SEED: u64 = 0xDEAD_BEEF_1234_5678;
+    const DST: u64 = 0x5000; // 4KB-aligned GVA inside the 1GB identity window
+    const LEN: u64 = 100; // not a multiple of 8 — exercises the partial last word
+    const PID: u64 = 4321;
+
+    let mut ctx = MockVmContext::new();
+    install_identity_paging(&mut ctx);
+    ctx.state_mut()
+        .devices
+        .random
+        .configure(RdrandMode::SeededRng, SEED);
+
+    // Record the served bytes on the unified randomness event stream.
+    let buffer = std::vec![0u8; EVENT_BUFFER_SIZE];
+    ctx.state_mut().set_event_buffer(buffer.as_ptr() as *mut u8);
+    ctx.state_mut()
+        .set_event_categories(EventCategories::RANDOMNESS);
+
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_guest_rip(0x1000);
+    ctx.set_instruction_len(3);
+    ctx.gprs_mut().rax = HYPERCALL_GET_RANDOM;
+    ctx.gprs_mut().rbx = DST; // destination buffer
+    ctx.gprs_mut().rcx = LEN; // bytes requested
+    ctx.gprs_mut().rdx = PID; // requesting PID
+
+    let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+
+    // Seeded mode resumes the guest directly — no exit to userspace.
+    assert_eq!(result, ExitHandlerResult::Continue);
+    assert_eq!(ctx.gprs().rax, LEN, "RAX = bytes written");
+    assert_eq!(
+        ctx.get_guest_rip(),
+        Some(0x1003),
+        "RIP advanced past VMCALL"
+    );
+
+    // The buffer holds exactly the device's xorshift stream for this seed.
+    let expected = expected_seeded_bytes(SEED, LEN as usize);
+    assert_eq!(
+        &ctx.memory[DST as usize..DST as usize + LEN as usize],
+        expected.as_slice(),
+        "guest buffer = seeded PRNG stream"
+    );
+    assert!(expected.iter().any(|&b| b != 0), "stream is non-trivial");
+    // Nothing written past the requested length.
+    assert_eq!(
+        ctx.memory[DST as usize + LEN as usize],
+        0,
+        "no overrun past requested length"
+    );
+
+    // One unified Randomness event: a RandomPayload header (source = GetRandom,
+    // the requesting PID) followed by the served bytes.
+    let hdr_size = core::mem::size_of::<RandomPayload>();
+    let kind = u16::from_le_bytes([buffer[24], buffer[25]]);
+    let payload_len = u32::from_le_bytes([buffer[28], buffer[29], buffer[30], buffer[31]]) as usize;
+    assert_eq!(kind, EventKind::Randomness.as_u16());
+    assert_eq!(payload_len, hdr_size + LEN as usize);
+    let payload = &buffer[EVENT_HEADER_SIZE..EVENT_HEADER_SIZE + payload_len];
+    let expected_hdr = RandomPayload {
+        pid: PID as u32,
+        source: RandomSource::GetRandom as u8,
+        ..RandomPayload::default()
+    };
+    assert_eq!(
+        &payload[..hdr_size],
+        expected_hdr.as_bytes(),
+        "header records source=GetRandom + the requesting PID"
+    );
+    assert_eq!(
+        &payload[hdr_size..],
+        expected.as_slice(),
+        "event records the served bytes verbatim"
+    );
+
+    // Determinism: a second, identically seeded VM serves the same bytes.
+    let mut ctx2 = MockVmContext::new();
+    install_identity_paging(&mut ctx2);
+    ctx2.state_mut()
+        .devices
+        .random
+        .configure(RdrandMode::SeededRng, SEED);
+    ctx2.set_exit_reason(ExitReason::Vmcall);
+    ctx2.set_exit_qualification(0);
+    ctx2.set_guest_rip(0x1000);
+    ctx2.set_instruction_len(3);
+    ctx2.gprs_mut().rax = HYPERCALL_GET_RANDOM;
+    ctx2.gprs_mut().rbx = DST;
+    ctx2.gprs_mut().rcx = LEN;
+    ctx2.gprs_mut().rdx = PID;
+    let _ = handle_exit(&mut ctx2, &MockKernel, &mut MockFrameAllocator::new());
+    assert_eq!(
+        &ctx.memory[DST as usize..DST as usize + LEN as usize],
+        &ctx2.memory[DST as usize..DST as usize + LEN as usize],
+        "same seed → identical guest randomness"
+    );
+}
+
+/// A request larger than `RANDOM_REPLY_MAX` is capped: the handler serves at
+/// most that many bytes (the guest loops for the rest) and leaves the tail of
+/// the buffer untouched.
+#[test]
+fn test_vmcall_get_random_seeded_caps_at_reply_max() {
+    use crate::devices::{RdrandMode, RANDOM_REPLY_MAX};
+    use crate::hypercalls::HYPERCALL_GET_RANDOM;
+
+    const DST: u64 = 0x5000;
+    let over = (RANDOM_REPLY_MAX + 64) as u64;
+
+    let mut ctx = MockVmContext::new();
+    install_identity_paging(&mut ctx);
+    ctx.state_mut()
+        .devices
+        .random
+        .configure(RdrandMode::SeededRng, 1);
+
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_guest_rip(0x1000);
+    ctx.set_instruction_len(3);
+    ctx.gprs_mut().rax = HYPERCALL_GET_RANDOM;
+    ctx.gprs_mut().rbx = DST;
+    ctx.gprs_mut().rcx = over;
+    ctx.gprs_mut().rdx = 1;
+
+    let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+    assert_eq!(result, ExitHandlerResult::Continue);
+    assert_eq!(
+        ctx.gprs().rax,
+        RANDOM_REPLY_MAX as u64,
+        "served bytes capped at RANDOM_REPLY_MAX"
+    );
+    assert_eq!(
+        ctx.memory[DST as usize + RANDOM_REPLY_MAX],
+        0,
+        "no bytes written past the cap"
+    );
+}
+
+/// ExitToUserspace mode: the first VMCALL records the request (PID + length) and
+/// exits as `VmcallGetRandom` *without* advancing RIP; userspace stages the
+/// reply bytes; the re-executed VMCALL writes them into the guest buffer,
+/// returns the count, advances RIP, records the event, and clears the request.
+#[test]
+fn test_vmcall_get_random_exit_to_userspace_roundtrip() {
+    use crate::devices::RdrandMode;
+    use crate::events::{
+        EventCategories, EventKind, RandomPayload, RandomSource, EVENT_BUFFER_SIZE,
+        EVENT_HEADER_SIZE,
+    };
+    use crate::hypercalls::HYPERCALL_GET_RANDOM;
+
+    const DST: u64 = 0x5000;
+    const LEN: u64 = 48;
+    const PID: u64 = 1337;
+    let staged: Vec<u8> = (0..LEN as u8).map(|i| i.wrapping_mul(7)).collect();
+
+    let mut ctx = MockVmContext::new();
+    install_identity_paging(&mut ctx);
+    ctx.state_mut()
+        .devices
+        .random
+        .configure(RdrandMode::ExitToUserspace, 0);
+
+    let buffer = std::vec![0u8; EVENT_BUFFER_SIZE];
+    ctx.state_mut().set_event_buffer(buffer.as_ptr() as *mut u8);
+    ctx.state_mut()
+        .set_event_categories(EventCategories::RANDOMNESS);
+
+    ctx.set_exit_reason(ExitReason::Vmcall);
+    ctx.set_exit_qualification(0);
+    ctx.set_guest_rip(0x1000);
+    ctx.set_instruction_len(3);
+    ctx.gprs_mut().rax = HYPERCALL_GET_RANDOM;
+    ctx.gprs_mut().rbx = DST;
+    ctx.gprs_mut().rcx = LEN;
+    ctx.gprs_mut().rdx = PID;
+
+    // First entry: exit to userspace, request recorded, RIP not advanced.
+    let first = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+    assert_eq!(
+        first,
+        ExitHandlerResult::ExitToUserspace(ExitReason::VmcallGetRandom)
+    );
+    assert_eq!(ctx.get_guest_rip(), Some(0x1000), "RIP not advanced yet");
+    assert!(ctx.state().devices.random.awaiting, "request is pending");
+    assert_eq!(ctx.state().devices.random.pid, PID as u32);
+    assert_eq!(ctx.state().devices.random.req_len, LEN as u32);
+    assert_eq!(ctx.state().event_buffer_len(), 0, "no event until served");
+
+    // Userspace stages the reply bytes (the kernel SET_RANDOM_BYTES path).
+    ctx.state_mut().devices.random.stage_reply(&staged);
+
+    // Re-execute the same VMCALL: bytes are written, RIP advances, event emitted.
+    let second = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
+    assert_eq!(second, ExitHandlerResult::Continue);
+    assert_eq!(ctx.gprs().rax, LEN, "RAX = staged byte count");
+    assert_eq!(ctx.get_guest_rip(), Some(0x1003), "RIP advanced");
+    assert_eq!(
+        &ctx.memory[DST as usize..DST as usize + LEN as usize],
+        staged.as_slice(),
+        "guest buffer = userspace-staged bytes"
+    );
+    assert!(
+        !ctx.state().devices.random.awaiting,
+        "request cleared after serving"
+    );
+
+    // The served bytes were recorded as a unified Randomness event: a
+    // RandomPayload header (source = GetRandom, the requesting PID) + the bytes.
+    let hdr_size = core::mem::size_of::<RandomPayload>();
+    let kind = u16::from_le_bytes([buffer[24], buffer[25]]);
+    let payload_len = u32::from_le_bytes([buffer[28], buffer[29], buffer[30], buffer[31]]) as usize;
+    assert_eq!(kind, EventKind::Randomness.as_u16());
+    assert_eq!(payload_len, hdr_size + LEN as usize);
+    let payload = &buffer[EVENT_HEADER_SIZE..EVENT_HEADER_SIZE + payload_len];
+    let expected_hdr = RandomPayload {
+        pid: PID as u32,
+        source: RandomSource::GetRandom as u8,
+        ..RandomPayload::default()
+    };
+    assert_eq!(&payload[..hdr_size], expected_hdr.as_bytes());
+    assert_eq!(&payload[hdr_size..], staged.as_slice());
+}

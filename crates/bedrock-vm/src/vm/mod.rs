@@ -10,7 +10,8 @@ mod stats;
 pub use config::{EventConfig, ExitTrigger, SingleStepConfig, EXIT_REASON_CHECKPOINT};
 pub use exit::{ExitKind, VmExit};
 pub use ioctl::{
-    FeedbackBufferInfo, FeedbackBufferInfoRequest, IoActionPayload, IO_CHANNEL_BUF_SIZE,
+    FeedbackBufferInfo, FeedbackBufferInfoRequest, IoActionPayload, RandomBytes, RandomRequest,
+    IO_CHANNEL_BUF_SIZE, RANDOM_REPLY_MAX,
 };
 pub use stats::{ExitStatEntry, ExitStats, ExitStatsReport, IoctlStats};
 
@@ -542,6 +543,48 @@ impl Vm {
             return Err(io::Error::last_os_error());
         }
 
+        Ok(())
+    }
+
+    /// Read the pending `HYPERCALL_GET_RANDOM` request after a
+    /// [`ExitKind::VmcallGetRandom`] exit: the requesting PID and the number of
+    /// bytes to serve (already capped at `RANDOM_REPLY_MAX`).
+    pub fn random_request(&self) -> io::Result<RandomRequest> {
+        let mut req = RandomRequest::default();
+        let ret = unsafe {
+            libc::ioctl(
+                self.fd.as_raw_fd(),
+                BEDROCK_VM_GET_RANDOM_REQUEST as libc::c_ulong,
+                &mut req as *mut RandomRequest,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(req)
+    }
+
+    /// Stage the reply bytes for the pending `HYPERCALL_GET_RANDOM` request, then
+    /// `run()` again to let the guest's VMCALL complete. Bytes beyond
+    /// `RANDOM_REPLY_MAX` are dropped (the request was capped to that anyway).
+    ///
+    /// Only used when the random device is in ExitToUserspace mode.
+    pub fn set_random_bytes(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut payload = RandomBytes::default();
+        let n = bytes.len().min(RANDOM_REPLY_MAX);
+        payload.data[..n].copy_from_slice(&bytes[..n]);
+        payload.len = n as u32;
+
+        let ret = unsafe {
+            libc::ioctl(
+                self.fd.as_raw_fd(),
+                BEDROCK_VM_SET_RANDOM_BYTES as libc::c_ulong,
+                &payload as *const RandomBytes,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
     }
 

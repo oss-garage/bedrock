@@ -3,7 +3,7 @@
 //! VMCALL exit handler for hypercall dispatch.
 
 use super::ept::{translate_gva_range_to_gpas, translate_gva_to_gpa};
-use super::helpers::{advance_rip, ExitHandlerResult};
+use super::helpers::{advance_rip, emit_randomness_event, ExitHandlerResult};
 use super::pebs::register_pebs_page;
 use super::reasons::ExitReason;
 
@@ -123,6 +123,76 @@ fn copy_serial_console_from_guest<C: VmContext>(
         offset += n;
     }
     Ok(())
+}
+
+/// Outcome of a failed guest-memory write from a hypercall handler.
+enum WriteGuest {
+    /// A COW page could not be allocated — caller should surface
+    /// `PoolExhausted` and retry the VMCALL once the pool is refilled.
+    Pool,
+    /// GVA translation or the write itself failed.
+    Fault,
+}
+
+/// Ensure every guest page touched by `[gva, gva+len)` is writable from the
+/// hypervisor on a forked VM. A hypervisor-side write generates no EPT
+/// violation, so the lazy COW-on-write path never fires (the same reason
+/// `pre_cow_io_channel_page` exists). We proactively COW each page here, before
+/// any bytes are produced, so a pool-exhaustion retry never double-advances a
+/// PRNG or re-consumes input. No-op for root VMs (their EPT already maps
+/// writable host memory).
+fn ensure_guest_writable<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &mut A,
+    gva: u64,
+    len: usize,
+) -> Result<(), WriteGuest> {
+    if !ctx.is_forked() {
+        return Ok(());
+    }
+    let mut offset = 0usize;
+    while offset < len {
+        let cur_gva = gva.wrapping_add(offset as u64);
+        let page_off = (cur_gva & 0xFFF) as usize;
+        let in_page = (4096 - page_off).min(len - offset);
+        let gpa = translate_gva_to_gpa(ctx, cur_gva).map_err(|()| WriteGuest::Fault)?;
+        if ctx.handle_cow_fault(gpa, allocator).is_none() {
+            return Err(WriteGuest::Pool);
+        }
+        offset += in_page;
+    }
+    Ok(())
+}
+
+/// Write `src` into guest memory at `gva`, one page at a time so the write may
+/// straddle page boundaries. The destination pages must already be writable
+/// (see [`ensure_guest_writable`]).
+fn write_guest_bytes<C: VmContext>(ctx: &mut C, gva: u64, src: &[u8]) -> Result<(), WriteGuest> {
+    let mut offset = 0usize;
+    while offset < src.len() {
+        let cur_gva = gva.wrapping_add(offset as u64);
+        let page_off = (cur_gva & 0xFFF) as usize;
+        let in_page = (4096 - page_off).min(src.len() - offset);
+        let gpa = translate_gva_to_gpa(ctx, cur_gva).map_err(|()| WriteGuest::Fault)?;
+        ctx.write_guest_memory(gpa, &src[offset..offset + in_page])
+            .map_err(|_| WriteGuest::Fault)?;
+        offset += in_page;
+    }
+    Ok(())
+}
+
+/// Record a served `HYPERCALL_GET_RANDOM` request on the unified randomness
+/// event stream: a [`RandomPayload`] with `source = GetRandom` and the
+/// requesting PID, followed by the bytes handed to the guest. This is the same
+/// emit path RDRAND/RDSEED use ([`emit_randomness_event`]) — only the source and
+/// the trailing bytes differ.
+fn emit_get_random_event<C: VmContext>(ctx: &mut C, pid: u32, bytes: &[u8]) {
+    let payload = RandomPayload {
+        pid,
+        source: RandomSource::GetRandom as u8,
+        ..RandomPayload::default()
+    };
+    emit_randomness_event(ctx, &payload, bytes);
 }
 
 /// Handle VMCALL exit by dispatching based on hypercall number in RAX.
@@ -560,6 +630,115 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 let _ = ctx.state_mut().event_emit_console(len);
             }
             ExitHandlerResult::Continue
+        }
+        HYPERCALL_GET_RANDOM => {
+            // ABI (registers):
+            //   RBX = destination buffer GVA
+            //   RCX = bytes requested
+            //   RDX = PID (current->tgid) of the requesting process
+            // Return (RAX): bytes written, or !0 on failure.
+            //
+            // The single chokepoint behind the guest's /dev/urandom,
+            // /dev/random and getrandom(). Mirrors the RDRAND device's two
+            // modes (configured together): SeededRng fills from a deterministic
+            // in-VM PRNG with no userspace round-trip; ExitToUserspace records
+            // the request, exits so the fuzzer can stage the exact reply bytes
+            // (surfacing the request's size + PID), then writes them on re-entry.
+            let buf_gva = ctx.state().gprs.rbx;
+            let req_len = ctx.state().gprs.rcx;
+            let pid = ctx.state().gprs.rdx;
+            let cap = (req_len as usize).min(RANDOM_REPLY_MAX);
+
+            match ctx.state().devices.random.mode {
+                RdrandMode::SeededRng => {
+                    // Pre-COW the destination before advancing the PRNG so a
+                    // pool-exhaustion retry re-produces identical bytes.
+                    match ensure_guest_writable(ctx, allocator, buf_gva, cap) {
+                        Ok(()) => {}
+                        Err(WriteGuest::Pool) => {
+                            return ExitHandlerResult::ExitToUserspace(ExitReason::PoolExhausted);
+                        }
+                        Err(WriteGuest::Fault) => {
+                            ctx.state_mut().gprs.rax = !0u64;
+                            if let Err(e) = advance_rip(ctx) {
+                                return ExitHandlerResult::Error(e);
+                            }
+                            return ExitHandlerResult::Continue;
+                        }
+                    }
+                    let mut tmp = [0u8; RANDOM_REPLY_MAX];
+                    let mut off = 0;
+                    while off < cap {
+                        let v = ctx.state_mut().devices.random.next_seeded_u64();
+                        let n = (cap - off).min(8);
+                        tmp[off..off + n].copy_from_slice(&v.to_le_bytes()[..n]);
+                        off += n;
+                    }
+                    let rax = match write_guest_bytes(ctx, buf_gva, &tmp[..cap]) {
+                        Ok(()) => {
+                            emit_get_random_event(ctx, pid as u32, &tmp[..cap]);
+                            cap as u64
+                        }
+                        // Pages were just COW'd, so a fault here is unexpected.
+                        Err(_) => !0u64,
+                    };
+                    ctx.state_mut().gprs.rax = rax;
+                    if let Err(e) = advance_rip(ctx) {
+                        return ExitHandlerResult::Error(e);
+                    }
+                    ExitHandlerResult::Continue
+                }
+                RdrandMode::ExitToUserspace => {
+                    if ctx.state().devices.random.needs_get_random_exit() {
+                        // First entry: record the request and hand it to
+                        // userspace. Don't advance RIP — we re-execute the
+                        // VMCALL once the reply bytes are staged.
+                        ctx.state_mut()
+                            .devices
+                            .random
+                            .begin_request(buf_gva, cap as u32, pid as u32);
+                        return ExitHandlerResult::ExitToUserspace(ExitReason::VmcallGetRandom);
+                    }
+                    // Second entry: userspace staged the reply bytes.
+                    let target_gva = ctx.state().devices.random.buf_gva;
+                    let n = {
+                        let r = &ctx.state().devices.random;
+                        (r.reply_len as usize).min(r.req_len as usize)
+                    };
+                    match ensure_guest_writable(ctx, allocator, target_gva, n) {
+                        Ok(()) => {}
+                        Err(WriteGuest::Pool) => {
+                            // Keep the staged reply and the in-flight request so
+                            // the retried VMCALL completes the same write.
+                            return ExitHandlerResult::ExitToUserspace(ExitReason::PoolExhausted);
+                        }
+                        Err(WriteGuest::Fault) => {
+                            ctx.state_mut().devices.random.clear_request();
+                            ctx.state_mut().gprs.rax = !0u64;
+                            if let Err(e) = advance_rip(ctx) {
+                                return ExitHandlerResult::Error(e);
+                            }
+                            return ExitHandlerResult::Continue;
+                        }
+                    }
+                    let mut tmp = [0u8; RANDOM_REPLY_MAX];
+                    let req_pid = ctx.state().devices.random.pid;
+                    tmp[..n].copy_from_slice(&ctx.state().devices.random.reply[..n]);
+                    let rax = match write_guest_bytes(ctx, target_gva, &tmp[..n]) {
+                        Ok(()) => {
+                            emit_get_random_event(ctx, req_pid, &tmp[..n]);
+                            n as u64
+                        }
+                        Err(_) => !0u64,
+                    };
+                    ctx.state_mut().devices.random.clear_request();
+                    ctx.state_mut().gprs.rax = rax;
+                    if let Err(e) = advance_rip(ctx) {
+                        return ExitHandlerResult::Error(e);
+                    }
+                    ExitHandlerResult::Continue
+                }
+            }
         }
         _ => {
             // Unknown hypercall - exit to userspace with generic Vmcall reason

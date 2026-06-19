@@ -564,8 +564,10 @@ fn run() -> io::Result<()> {
                         continue;
                     }
                     ExitKind::Continue | ExitKind::EventBufferFull => continue,
-                    ExitKind::Rdrand | ExitKind::Rdseed => {
-                        warn!("VM exit: RDRAND/RDSEED in userspace mode not supported by CLI");
+                    ExitKind::Rdrand | ExitKind::Rdseed | ExitKind::VmcallGetRandom => {
+                        warn!(
+                            "VM exit: RDRAND/RDSEED/GET_RANDOM in userspace mode not supported by CLI"
+                        );
                         break;
                     }
                     ExitKind::UnhandledExit { reason } => {

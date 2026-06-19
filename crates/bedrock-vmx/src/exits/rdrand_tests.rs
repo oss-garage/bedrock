@@ -32,7 +32,7 @@ fn test_rdrand_seeded_rng_mode() {
     let mut ctx = MockVmContext::new();
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .configure(RdrandMode::SeededRng, 12345);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(3);
@@ -61,7 +61,7 @@ fn test_rdrand_exit_to_userspace_mode() {
     let mut ctx = MockVmContext::new();
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .configure(RdrandMode::ExitToUserspace, 0);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(3);
@@ -79,7 +79,7 @@ fn test_rdrand_exit_to_userspace_mode() {
     assert_eq!(ctx.get_guest_rip(), Some(0x1000));
 
     // Set pending value and try again
-    ctx.state_mut().devices.rdrand.set_pending_value(0x42424242);
+    ctx.state_mut().devices.random.set_pending_value(0x42424242);
     let result = handle_rdrand(&mut ctx);
     assert!(matches!(result, ExitHandlerResult::Continue));
 
@@ -94,11 +94,11 @@ fn test_rdrand_32bit_operation() {
     let mut ctx = MockVmContext::new();
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .configure(RdrandMode::ExitToUserspace, 0);
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .set_pending_value(0xFFFFFFFF_DEADBEEF);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(3);
@@ -123,11 +123,11 @@ fn test_rdrand_16bit_operation() {
     let mut ctx = MockVmContext::new();
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .configure(RdrandMode::ExitToUserspace, 0);
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .set_pending_value(0xFFFFFFFF_DEADBEEF);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(4); // 16-bit RDRAND may be longer with prefix
@@ -152,9 +152,9 @@ fn test_rdrand_r8_register() {
     let mut ctx = MockVmContext::new();
     ctx.state_mut()
         .devices
-        .rdrand
+        .random
         .configure(RdrandMode::ExitToUserspace, 0);
-    ctx.state_mut().devices.rdrand.set_pending_value(0xCAFEBABE);
+    ctx.state_mut().devices.random.set_pending_value(0xCAFEBABE);
     ctx.set_exit_reason(ExitReason::Rdrand);
     ctx.set_instruction_len(4); // R8-R15 need REX prefix
     ctx.set_guest_rip(0x1000);

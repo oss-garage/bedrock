@@ -74,6 +74,55 @@ pub(crate) const BEDROCK_VM_GET_VM_ID: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 9, siz
 pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u64 =
     ioctl_iow(BEDROCK_IOC_MAGIC, 13, size_of::<EventConfig>());
 
+/// Maximum bytes served per `HYPERCALL_GET_RANDOM`. Must stay in lockstep with
+/// `bedrock_vmx::RANDOM_REPLY_MAX` — the kernel caps each request at this many
+/// bytes and the guest loops for larger reads.
+pub const RANDOM_REPLY_MAX: usize = 256;
+
+/// The pending `HYPERCALL_GET_RANDOM` request, read by userspace after a
+/// `VmcallGetRandom` exit so it knows how many bytes to serve and which process
+/// asked.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct RandomRequest {
+    /// PID (`current->tgid`) of the requesting process.
+    pub pid: u32,
+    /// Number of bytes requested (already capped at `RANDOM_REPLY_MAX`).
+    pub len: u32,
+}
+
+/// Reply bytes staged by userspace to satisfy the pending `GET_RANDOM` request.
+/// Inline buffer (like `IoActionPayload`) so the ABI is self-contained — no
+/// guest-supplied pointer to `copy_from_user`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RandomBytes {
+    /// Number of valid bytes in `data` (capped at `RANDOM_REPLY_MAX`).
+    pub len: u32,
+    /// Reserved for alignment.
+    pub _reserved: u32,
+    /// Reply bytes.
+    pub data: [u8; RANDOM_REPLY_MAX],
+}
+
+impl Default for RandomBytes {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            _reserved: 0,
+            data: [0; RANDOM_REPLY_MAX],
+        }
+    }
+}
+
+// _IOR('B', 14, RandomRequest) - read the pending GET_RANDOM request (pid+len).
+pub(crate) const BEDROCK_VM_GET_RANDOM_REQUEST: u64 =
+    ioctl_ior(BEDROCK_IOC_MAGIC, 14, size_of::<RandomRequest>());
+
+// _IOW('B', 15, RandomBytes) - stage the reply bytes for the pending request.
+pub(crate) const BEDROCK_VM_SET_RANDOM_BYTES: u64 =
+    ioctl_iow(BEDROCK_IOC_MAGIC, 15, size_of::<RandomBytes>());
+
 // Device ioctls (on /dev/bedrock)
 // _IOW('B', 1, u64) - takes parent VM ID as argument
 pub(crate) const BEDROCK_CREATE_FORKED_VM: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 1, size_of::<u64>());

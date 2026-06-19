@@ -348,15 +348,79 @@ pub(crate) fn handle_set_rdrand_config<F: VmFileOps>(vm_file: &mut F, arg: usize
         }
     };
 
-    // Configure the RDRAND state
+    // Configure the unified randomness device — one mode and one PRNG seed for
+    // RDRAND, RDSEED and HYPERCALL_GET_RANDOM.
     let vm = vm_file.vm_mut();
-    vm.state_mut().devices.rdrand.configure(mode, config.value);
+    vm.state_mut().devices.random.configure(mode, config.value);
 
     log_info!(
         "SET_RDRAND_CONFIG: mode={:?}, value=0x{:x}\n",
         mode,
         config.value
     );
+    0
+}
+
+/// Handle GET_RANDOM_REQUEST ioctl - return the pending `HYPERCALL_GET_RANDOM`
+/// request (requesting PID + byte count) so userspace can size the reply.
+pub(crate) fn handle_get_random_request<F: VmFileOps>(vm_file: &F, arg: usize) -> isize {
+    let req = {
+        let r = &vm_file.vm().state().devices.random;
+        BedrockRandomRequest {
+            pid: r.pid,
+            len: r.req_len,
+        }
+    };
+
+    // SAFETY: `arg` is a user-provided pointer from the ioctl syscall, and `req`
+    // is a valid stack-local BedrockRandomRequest. bedrock_copy_to_user performs
+    // a bounded copy.
+    let not_copied = unsafe {
+        bedrock_copy_to_user(
+            arg as *mut core::ffi::c_void,
+            core::ptr::from_ref(&req).cast::<core::ffi::c_void>(),
+            size_of::<BedrockRandomRequest>() as core::ffi::c_ulong,
+        )
+    };
+
+    if not_copied != 0 {
+        return -(bindings::EFAULT as isize);
+    }
+
+    0
+}
+
+/// Handle SET_RANDOM_BYTES ioctl - stage userspace-supplied reply bytes for the
+/// pending `HYPERCALL_GET_RANDOM` request.
+pub(crate) fn handle_set_random_bytes<F: VmFileOps>(vm_file: &mut F, arg: usize) -> isize {
+    let mut payload = core::mem::MaybeUninit::<BedrockRandomBytes>::uninit();
+
+    // SAFETY: `payload.as_mut_ptr()` points to valid, aligned, writable memory
+    // for a BedrockRandomBytes. `arg` is a user-provided pointer from the ioctl
+    // syscall. bedrock_copy_from_user performs a bounded copy.
+    let not_copied = unsafe {
+        bedrock_copy_from_user(
+            payload.as_mut_ptr().cast::<core::ffi::c_void>(),
+            arg as *const core::ffi::c_void,
+            size_of::<BedrockRandomBytes>() as core::ffi::c_ulong,
+        )
+    };
+
+    if not_copied != 0 {
+        return -(bindings::EFAULT as isize);
+    }
+
+    // SAFETY: bedrock_copy_from_user succeeded (returned 0), so all bytes of
+    // `payload` are initialized.
+    let payload = unsafe { payload.assume_init() };
+    let len = (payload.len as usize).min(BEDROCK_RANDOM_REPLY_MAX);
+
+    let vm = vm_file.vm_mut();
+    vm.state_mut()
+        .devices
+        .random
+        .stage_reply(&payload.data[..len]);
+
     0
 }
 
@@ -380,7 +444,7 @@ pub(crate) fn handle_set_rdrand_value<F: VmFileOps>(vm_file: &mut F, arg: usize)
     }
 
     let vm = vm_file.vm_mut();
-    vm.state_mut().devices.rdrand.set_pending_value(value);
+    vm.state_mut().devices.random.set_pending_value(value);
 
     0
 }

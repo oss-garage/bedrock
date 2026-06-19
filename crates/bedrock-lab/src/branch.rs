@@ -644,6 +644,13 @@ impl Branch {
                         return Ok((at, RunOutcome::Yielded { kind: exit.kind() }))
                     }
                 },
+                ExitKind::VmcallGetRandom => match self.feed_random()? {
+                    FeedRng::Fed => continue,
+                    FeedRng::Exhausted => return Ok((at, RunOutcome::RngExhausted)),
+                    FeedRng::NoSource => {
+                        return Ok((at, RunOutcome::Yielded { kind: exit.kind() }))
+                    }
+                },
                 ExitKind::Continue | ExitKind::EventBufferFull => continue,
                 kind => return Ok((at, RunOutcome::Yielded { kind })),
             }
@@ -730,6 +737,43 @@ impl Branch {
         self.vm_mut().set_rdrand_value(value).map_err(|source| {
             LabError::Vm(VmError::Ioctl {
                 operation: "SET_RDRAND_VALUE",
+                source,
+            })
+        })?;
+        Ok(FeedRng::Fed)
+    }
+
+    /// Serve the bytes for a pending `HYPERCALL_GET_RANDOM` request (the guest's
+    /// `/dev/urandom` / `getrandom()` path). Reads the request's size + PID from
+    /// the VM, pulls that many bytes from the [`InputSource`] via
+    /// [`next_random`](crate::InputSource::next_random), and stages them with
+    /// `SET_RANDOM_BYTES` so the next `vm.run()` re-executes the trapped VMCALL
+    /// with those bytes. The served bytes are recorded from the event stream (the
+    /// `Randomness` record with `source = GetRandom` that the handler emits), not
+    /// here. Returns
+    /// [`FeedRng::NoSource`] when the branch has no input source (seeded mode
+    /// never exits here, so this is a defensive fallback).
+    fn feed_random(&mut self) -> Result<FeedRng> {
+        let req = self.vm_mut().random_request().map_err(|source| {
+            LabError::Vm(VmError::Ioctl {
+                operation: "GET_RANDOM_REQUEST",
+                source,
+            })
+        })?;
+        let len = req.len as usize;
+        let pid = req.pid;
+
+        // Scope the source borrow so we can re-borrow `self.vm` afterwards.
+        let bytes = {
+            let Some(source) = self.input_source.as_mut() else {
+                return Ok(FeedRng::NoSource);
+            };
+            source.next_random(len, pid)
+        };
+
+        self.vm_mut().set_random_bytes(&bytes).map_err(|source| {
+            LabError::Vm(VmError::Ioctl {
+                operation: "SET_RANDOM_BYTES",
                 source,
             })
         })?;

@@ -71,7 +71,7 @@ pub use checkpoint::{Checkpoint, CheckpointId, LabOpts};
 pub use error::LabError;
 pub use event::{Event, EventSink};
 pub use rng::{
-    InputRecording, InputSource, IoInput, RecordedInputSource, RngInput, RngMode, SystemRng,
+    InputRecording, InputSource, IoInput, RandomInput, RecordedInputSource, RngMode, SystemRng,
 };
 pub use time::{VirtDuration, VirtTime};
 pub use tree::{BranchView, Tree};

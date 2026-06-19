@@ -2103,7 +2103,10 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
         let ioapic_hash = self.devices.ioapic.state_hash();
         let rtc_hash = self.devices.rtc.state_hash();
         let mtrr_hash = self.devices.mtrr.state_hash();
-        let rdrand_hash = self.devices.rdrand.state_hash();
+        // The unified randomness device (RDRAND/RDSEED + GET_RANDOM) — its mode,
+        // PRNG position, and any staged value — so guest randomness divergence
+        // (in SeededRng mode) is caught.
+        let rdrand_hash = self.devices.random.state_hash();
 
         // Memory hash is computed later by finalize_exit_record() after this method returns.
         let memory_hash = 0;
