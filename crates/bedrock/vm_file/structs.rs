@@ -295,6 +295,8 @@ pub(crate) struct BedrockExitStats {
     pub pebs_armed_iter_no_fire: u64,
     /// Timer fires where emulated_tsc > deadline (silent-PEBS late path).
     pub apic_timer_late_inject: u64,
+    /// Largest PEBS skid this run; minimum safe `margin_for_host_cpu()` value.
+    pub max_pebs_skid: i64,
 }
 
 /// VM exit information returned to userspace from RUN ioctl.

@@ -1130,7 +1130,9 @@ pub fn handle_pebs_precise_exit<C: VmContext>(ctx: &mut C) -> ExitHandlerResult 
         let arm_current = armed_inst.saturating_add(armed_offset);
         let arm_delta = armed_target.saturating_sub(arm_current);
         let state = ctx.state_mut();
-        state.last_pebs_skid = (current_tsc as i64) - (armed_target as i64);
+        let skid = (current_tsc as i64) - (armed_target as i64);
+        state.last_pebs_skid = skid;
+        state.exit_stats.max_pebs_skid = state.exit_stats.max_pebs_skid.max(skid);
         state.last_pebs_inst_delta = (inst_count_now as i64) - (armed_inst as i64);
         state.last_pebs_tsc_offset_delta = (tsc_offset_now as i64) - (armed_offset as i64);
         state.last_pebs_iters_since_arm = iters;

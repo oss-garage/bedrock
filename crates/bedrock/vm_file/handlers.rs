@@ -587,6 +587,7 @@ pub(crate) fn handle_get_exit_stats<F: VmFileOps>(vm_file: &F, arg: usize) -> is
         pebs_arm_already_past: stats.pebs_arm_already_past,
         pebs_armed_iter_no_fire: stats.pebs_armed_iter_no_fire,
         apic_timer_late_inject: stats.apic_timer_late_inject,
+        max_pebs_skid: stats.max_pebs_skid,
     };
 
     // SAFETY: `arg` is a user-provided pointer from the ioctl syscall, and `exit_stats`

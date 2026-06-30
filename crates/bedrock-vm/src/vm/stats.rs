@@ -129,6 +129,10 @@ pub struct ExitStats {
     pub pebs_armed_iter_no_fire: u64,
     /// Timer fires with `emulated_tsc > deadline` (the late-delivery safety net).
     pub apic_timer_late_inject: u64,
+    /// Largest PEBS skid seen this run (`pebs_exit_tsc - armed_target_tsc`).
+    /// The host CPU's PEBS margin must be >= this, so it is the minimum safe
+    /// `margin_for_host_cpu()` value - read it off a run instead of guessing.
+    pub max_pebs_skid: i64,
 }
 
 impl ExitStats {
@@ -380,6 +384,11 @@ impl fmt::Display for ExitStatsReport<'_> {
             f,
             "  timer late inject:  {:>16}",
             format_count(stats.apic_timer_late_inject)
+        )?;
+        writeln!(
+            f,
+            "  max pebs skid:      {:>16}  (min safe margin_for_host_cpu)",
+            stats.max_pebs_skid
         )?;
         write!(f, "{TABLE_SEP}")
     }

@@ -769,6 +769,13 @@ pub struct AllExitStats {
     /// and the timer is delivered late on the current deterministic exit.
     /// Diagnostic for silent PEBS misses.
     pub apic_timer_late_inject: u64,
+    /// Largest PEBS skid seen this run: `pebs_exit_tsc - armed_target_tsc`,
+    /// i.e. how many instructions late PEBS fired relative to its programmed
+    /// overflow point (`target - margin`). The margin must be >= this value or
+    /// the count overshoots the deadline and MTF can't land it, so this is the
+    /// minimum safe `margin_for_host_cpu()` for the host CPU. 0 if no skid was
+    /// ever positive. See `exits::pebs::margin_for_host_cpu`.
+    pub max_pebs_skid: i64,
 }
 
 impl AllExitStats {
