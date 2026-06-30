@@ -17,6 +17,7 @@ mod boot;
 mod coverage;
 mod determinism;
 mod feedback;
+mod file_store;
 mod file_xfer;
 mod rng;
 mod workload_monitor;

@@ -41,6 +41,12 @@ pub enum LabError {
 
     /// The I/O channel returned bytes the lab couldn't decode.
     BadResponse(String),
+
+    /// The lab could not store a file chunk from the guest.
+    FileStoreFailed {
+        at: VirtTime,
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for LabError {
@@ -72,6 +78,10 @@ impl fmt::Display for LabError {
                 "failed to queue InputSource I/O at {at:?} for {target:?} command {command:?}: {source}"
             ),
             Self::BadResponse(msg) => write!(f, "bad I/O channel response: {msg}"),
+            Self::FileStoreFailed { at, source } => write!(
+                f,
+                "storing a file chunk from the guest failed at {at:?}: {source:?}"
+            ),
         }
     }
 }
