@@ -212,3 +212,32 @@ pub const HYPERCALL_FILE_FETCH: u64 = 10;
 /// (Numbers 8/9 are the paravirtual console and 10 is `HYPERCALL_FILE_FETCH` on
 /// this branch, so this is 11.)
 pub const HYPERCALL_GET_RANDOM: u64 = 11;
+
+/// Read the next chunk of a guest-side file from the feedback buffer into
+/// a file on the host.
+///
+/// Inputs: none in registers - the request and the response are framed inside
+/// the shared buffer the guest registered (via `HYPERCALL_REGISTER_FEEDBACK_BUFFER`
+/// under the id `bedrock-file-store`). The terms request and response are a bit
+/// backwards as the guest is not "requesting" anything. Before invoking the
+/// hypercall, the guest writes the following into the start of the buffer:
+/// - bytes `[0..4)`:   `u32` little-endian file name length.
+/// - bytes `[4..8)`:   `u32` little-endian chunk length.
+/// - bytes `[8..16)`:  reserved (zero).
+/// - bytes `[16..16+name_len)`: the file name
+/// - bytes `[16+name_len..16+name_len+chunk_len)`: file chunk
+///
+/// Outputs:
+/// - RAX: 0. The actual result is delivered by the host in the buffer (see below).
+///
+/// The hypervisor does not touch the buffer; it advances RIP and exits to
+/// userspace with `ExitReason::VmcallFileStore`. The host reads the request out of
+/// the (host-mapped) buffer, reads the file name and creates a file with the same
+/// name, then reads the chunk into the file. The host then responds via the buffer:
+/// - bytes `[0..8)`: `i64` little-endian result - `> 0` is the number of bytes the
+///   host read, `-1` means the host encountered an i/o error.
+/// - bytes `[8..16)`: reserved (zero).
+///
+/// If the host read succeeded, the guest sends the next chunk. This loop happens
+/// until the guest has no more chunks to send.
+pub const HYPERCALL_FILE_STORE: u64 = 12;

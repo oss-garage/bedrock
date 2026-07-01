@@ -223,6 +223,9 @@ pub enum ExitReason {
     /// the pending request (PID + length) via `GET_RANDOM_REQUEST`, stages the
     /// reply bytes with `SET_RANDOM_BYTES`, and re-runs.
     VmcallGetRandom = 269,
+    /// VMCALL hypercall: guest sent the next chunk of a guest file via
+    /// `HYPERCALL_FILE_STORE` (RAX=12).
+    VmcallFileStore = 270,
 }
 
 /// Error when converting from raw exit reason value.

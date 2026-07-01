@@ -74,6 +74,8 @@ pub enum ExitKind {
         /// Raw exit reason code.
         reason: u32,
     },
+    /// Guest sent the next chunk of a guest file (`HYPERCALL_FILE_STORE`).
+    FileStore,
 }
 
 /// VM exit information returned from the RUN ioctl.
@@ -138,6 +140,7 @@ impl VmExit {
             267 => "EVENT_BUFFER_FULL",
             268 => "VMCALL_FILE_FETCH",
             269 => "VMCALL_GET_RANDOM",
+            270 => "VMCALL_FILE_STORE",
             _ => "UNKNOWN",
         }
     }
@@ -158,6 +161,7 @@ impl VmExit {
             267 => ExitKind::EventBufferFull,
             268 => ExitKind::FileFetch,
             269 => ExitKind::VmcallGetRandom,
+            270 => ExitKind::FileStore,
             // Continuable: preemption timer, need_resched, mwait, monitor,
             // I/O instruction, pool exhausted, PEBS scratch-page registration,
             // I/O channel page registration (no userspace action needed —

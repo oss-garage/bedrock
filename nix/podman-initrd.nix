@@ -47,6 +47,14 @@ let
     installPhase = "mkdir -p $out/bin && cp bedrock-file-fetch $out/bin/";
   };
 
+  # Guest-side file sender that chunks files from the guest to the host.
+  bedrockFileStore = pkgs.pkgsStatic.stdenv.mkDerivation {
+    name = "bedrock-file-store";
+    dontUnpack = true;
+    buildPhase = "$CC -O2 -static -I${../guest} -o bedrock-file-store ${../guest/file-store.c}";
+    installPhase = "mkdir -p $out/bin && cp bedrock-file-store $out/bin/";
+  };
+
   # Guest kernel module that drives the deterministic I/O channel. Built
   # against the patched 6.18 guest kernel's headers so its kbuild
   # configuration (LLVM=1, no CONFIG_RUST, etc.) matches what the running
@@ -197,6 +205,7 @@ let
     pkgs.systemd
     bedrockPebsRegister
     bedrockFileFetch
+    bedrockFileStore
   ];
 
   # Merged environment — creates a single store path with bin/, sbin/, etc.
@@ -330,6 +339,9 @@ pkgs.stdenv.mkDerivation {
     # bedrock-file-fetch at /usr/local/bin/ so the init script finds it on PATH.
     # It downloads the workload's compose.yaml / images.tar from the host at boot.
     ln -sf ${bedrockFileFetch}/bin/bedrock-file-fetch rootfs/usr/local/bin/bedrock-file-fetch
+
+    # bedrock-file-store at /usr/local/bin/.
+    ln -sf ${bedrockFileStore}/bin/bedrock-file-store rootfs/usr/local/bin/bedrock-file-store
 
     # workload-monitor: watches podman container/exec lifecycle events and
     # records exit-code assertions to /bedrock/assertions.jsonl. Lives on the

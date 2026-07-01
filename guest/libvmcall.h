@@ -85,6 +85,13 @@ typedef unsigned long long vmcall_u64;
  */
 #define HYPERCALL_FILE_FETCH 10ULL
 
+/*
+ * Send the next chunk of a file on the guest to the host via a registered
+ * file sending feedback buffer. This buffer is distinct from the one used to
+ * fetch files.
+ */
+#define HYPERCALL_FILE_STORE 12ULL
+
 /* ------------------------------------------------------------------------- */
 /* ABI constants.                                                            */
 /* ------------------------------------------------------------------------- */
@@ -151,6 +158,25 @@ typedef unsigned long long vmcall_u64;
 #define VMCALL_FILE_XFER_BUFFER_ID "bedrock-file-xfer"
 #define VMCALL_FILE_XFER_HEADER_LEN 16U
 #define VMCALL_FILE_XFER_NOT_FOUND (-1LL)
+
+/*
+ * Format for HYPERCALL_FILE_STORE.
+ *
+ * Request (guest writes):
+ *   [0..4)  u32 little-endian file-name length
+ *   [4..8)  u32 little-endian chunk length
+ *   [8..16) reserved (zero)
+ *   [16..16+name_len) the file name
+ *   [16+name_len..16+name_len+chunk_len) the file data chunk
+ *
+ * Response (host writes):
+ *   [0..8)   i64 little-endian result: > 0 = bytes read,
+ *            VMCALL_FILE_STORE_IO_ERROR = host error'd while writing chunk
+ *   [8..16)  reserved (zero) to not introduce separate header lengths
+ */
+#define VMCALL_FILE_STORE_BUFFER_ID "bedrock-file-store"
+#define VMCALL_FILE_STORE_HEADER_LEN 16U
+#define VMCALL_FILE_STORE_IO_ERROR (-1LL)
 
 /* ------------------------------------------------------------------------- */
 /* Generic VMCALL primitives — hypercall number plus up to five arguments.   */
@@ -313,6 +339,14 @@ static inline vmcall_u64 vmcall_serial_write(vmcall_u64 len)
 static inline vmcall_u64 vmcall_file_fetch(void)
 {
 	return vmcall0(HYPERCALL_FILE_FETCH);
+}
+
+/* Store the next file chunk into the registered file store buffer. This is
+ * distinct from the file-transfer buffer.
+ */
+static inline vmcall_u64 vmcall_file_store(void)
+{
+        return vmcall0(HYPERCALL_FILE_STORE);
 }
 
 #ifdef __cplusplus

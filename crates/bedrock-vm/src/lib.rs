@@ -121,6 +121,7 @@ mod builder;
 pub mod console;
 mod error;
 pub mod events;
+pub mod file_store;
 pub mod file_xfer;
 pub mod io_channel;
 mod rdrand;

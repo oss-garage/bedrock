@@ -383,6 +383,17 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFileFetch)
         }
+        HYPERCALL_FILE_STORE => {
+            // The guest has sent a chunk of a guest file (name + chunk) into
+            // the registered `bedrock-file-store` feedback buffer. The host
+            // will read the chunk and respond (via the buffer) with how many
+            // bytes it read. Set RAX to 0, advance RIP, and exit to userspace.
+            ctx.state_mut().gprs.rax = 0;
+            if let Err(e) = advance_rip(ctx) {
+                return ExitHandlerResult::Error(e);
+            }
+            ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFileStore)
+        }
         HYPERCALL_IO_REGISTER_PAGE => {
             // RBX = guest virtual address of the shared 4KB page.
             // Must be 4KB-aligned; the GPA is what we record because the

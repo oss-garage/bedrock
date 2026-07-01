@@ -34,9 +34,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bedrock_lab::{BranchId, Checkpoint, Event, EventSink, LabOpts, RngMode};
+use bedrock_lab::{BashTarget, Branch, BranchId, Checkpoint, Event, EventSink, LabOpts, RngMode};
 use bedrock_vm::{boot::defaults, load_kernel, LinuxBootConfig, VmBuilder};
 
 /// Guest RAM. Matches the Nix integration test (`-m 5120`): the podman initrd
@@ -275,4 +276,41 @@ fn boot_ready(env: &GuestEnv) -> Result<Checkpoint, Box<dyn std::error::Error>> 
         },
     )?;
     Ok(cp)
+}
+
+/// sha256 of a host file as a lowercase hex string, via the `sha256sum` CLI
+/// (coreutils, present in CI). Panics on failure — the originals must exist for
+/// the comparison to mean anything.
+pub fn host_sha256(path: &str) -> String {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("run sha256sum {path} on host: {e}"));
+    assert!(out.status.success(), "host sha256sum {path} failed");
+    let stdout = String::from_utf8(out.stdout).expect("sha256sum utf8");
+    first_token(&stdout)
+}
+
+/// Hash a guest file with the same tool, dispatched over the deterministic bash
+/// I/O channel, and return its hex digest. Fails the test if the command didn't
+/// run cleanly — `sha256sum` exits non-zero when the file is missing, so this
+/// also covers the "file exists in the workload" check.
+pub fn guest_sha256(branch: &mut Branch, path: &str) -> String {
+    let out = branch
+        .bash(BashTarget::host(), &format!("sha256sum {path}"), true)
+        .expect("dispatch sha256sum in guest");
+    assert!(
+        out.success(),
+        "guest `sha256sum {path}` failed (status={} exit={}) — file missing? output: {:?}",
+        out.status,
+        out.exit_code,
+        out.output_lossy(),
+    );
+
+    first_token(&out.output_lossy())
+}
+
+/// The first whitespace-delimited token — `sha256sum` prints `<hex>  <path>`.
+pub fn first_token(s: &str) -> String {
+    s.split_whitespace().next().unwrap_or_default().to_string()
 }

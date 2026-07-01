@@ -13,6 +13,7 @@ use clap::Parser;
 use log::{debug, info, trace, warn};
 
 use bedrock_vm::events::EventKind;
+use bedrock_vm::file_store::FileWriter;
 use bedrock_vm::file_xfer::FileServer;
 use bedrock_vm::io_channel;
 use bedrock_vm::{
@@ -454,6 +455,10 @@ fn run() -> io::Result<()> {
         );
     }
 
+    // Build the file writer for the file store hypercall. This allows the host
+    // to copy files from the guest.
+    let mut file_writer = FileWriter::new();
+
     // Run VM
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
@@ -560,6 +565,13 @@ fn run() -> io::Result<()> {
                         match file_server.serve(&mut vm) {
                             Ok(n) => trace!("Served file chunk ({} bytes)", n),
                             Err(e) => warn!("Failed to serve file fetch: {}", e),
+                        }
+                        continue;
+                    }
+                    ExitKind::FileStore => {
+                        match file_writer.write(&mut vm) {
+                            Ok(n) => trace!("Wrote file chunk ({} bytes)", n),
+                            Err(e) => warn!("Failed to write guest file chunk on host: {}", e),
                         }
                         continue;
                     }

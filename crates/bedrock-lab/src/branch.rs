@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use bedrock_vm::events::EventKind;
+use bedrock_vm::file_store::FileWriter;
 use bedrock_vm::{
     EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger, Vm, VmError,
 };
@@ -202,6 +203,8 @@ pub struct Branch {
     /// [`Branch::disable_single_step`] can restore it after the temporary
     /// single-step override. Defaults to "capture nothing".
     event_config: EventConfig,
+    /// Used to extract files from the guest to the host.
+    file_writer: FileWriter,
 }
 
 impl Branch {
@@ -240,6 +243,7 @@ impl Branch {
             input_recording,
             last_stop_at: None,
             event_config: EventConfig::default(),
+            file_writer: FileWriter::new(),
         };
         lab.sink.on_event(Event::BranchCreated {
             branch: id,
@@ -702,6 +706,13 @@ impl Branch {
                 }
                 ExitKind::FeedbackBufferRegistered => {
                     self.on_feedback_buffer_registered(at)?;
+                    continue;
+                }
+                ExitKind::FileStore => {
+                    let vm = self.vm.as_mut().expect("Branch.vm taken");
+                    self.file_writer
+                        .write(vm)
+                        .map_err(|source| LabError::FileStoreFailed { at, source })?;
                     continue;
                 }
                 ExitKind::Rdrand | ExitKind::Rdseed => match self.feed_rng()? {
