@@ -107,6 +107,17 @@ done
 # regardless.
 bedrock-pebs-register | systemd-cat -t init &
 
+# Start the in-kernel concurrency-fuzz scheduler. It attaches the sched_ext
+# struct_ops with SCX_OPS_SWITCH_PARTIAL, so only SCHED_EXT tasks are governed
+# and everything else stays on stock CFS. A workload opts a process into
+# SCHED_EXT by wrapping it in thread-fuzz (bind-mounted into containers, see
+# containers.conf), so scx-init must be attached before the workload runs:
+# launch it here, backgrounded, since it holds the struct_ops link open for the
+# VM's lifetime. Its schedule is driven by the getrandom vmcall, which bedrock
+# serves from its controlled, fuzzer-driven stream: deterministic under the
+# single vCPU + emulated TSC.
+scx-init 2>&1 | systemd-cat -t scx-fuzz &
+
 # Reset podman state
 podman system reset -f 2>&1 | systemd-cat -t init || true
 
@@ -174,6 +185,11 @@ podman images 2>&1 | systemd-cat -t init
 # stream as structured JSON records and the host renders them for
 # display. This replaces the previous per-container follow-loop
 # entirely — restart resilience is now journald's problem, not ours.
+# Debug: report which OCI runtime podman will actually use (stock crun; the
+# fuzzing scheduler is opt-in per workload via thread-fuzz, not the runtime).
+podman info --format 'OCIRuntime: {{.Host.OCIRuntime.Name}} -> {{.Host.OCIRuntime.Path}}' 2>&1 \
+    | systemd-cat -t init
+
 cd /workload
 podman-compose up -d | systemd-cat -t init
 

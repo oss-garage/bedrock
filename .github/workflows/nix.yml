@@ -76,3 +76,47 @@ jobs:
       - run: PATH="$HOME/.cargo/bin:/usr/lib/llvm-18/bin:$PATH" just build
       - run: sudo just load
       - run: nix run .#test-bitcoin-workload
+
+  concurrency-fuzz:
+    name: "Run concurrency-fuzz workload [nested-virt, bedrock-cli]"
+    runs-on: runs-on=${{ github.run_id }}/runner=m7i-nested-virt
+    steps:
+      - uses: actions/checkout@v4
+      # The image only has the default Nix profile on PATH; cachix-action
+      # installs cachix into the per-user profile, so add that to PATH too.
+      - run: echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+      - uses: cachix/cachix-action@v15
+        with:
+          name: bedrock
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - run: ./workloads/concurrency-fuzz/build.sh
+      - run: sudo rmmod kvm-intel || true
+      - run: sudo rmmod kvm || true
+      - run: PATH="$HOME/.cargo/bin:/usr/lib/llvm-18/bin:$PATH" just build
+      - run: sudo just load
+      # Boot the workload 3 times and assert the fuzzer crashes the sample at the
+      # exact same emulated-TSC age every time. The "Item is invalid! age
+      # <N>ms" line (queue.c) is derived from the deterministic guest clock, so
+      # a stable <N> across runs is the determinism check; a differing value
+      # means host timing leaked into guest-visible state.
+      - name: Run workload 3 times and assert deterministic crash age
+        run: |
+          set -euo pipefail
+          age=""
+          for run in 1 2 3; do
+            echo "=== concurrency-fuzz run $run/3 ==="
+            nix run .#test-concurrency-fuzz-workload 2>&1 | tee "run-$run.log"
+            this="$(sed -n 's/.*Item is invalid! age \([0-9]*\)ms.*/\1/p' "run-$run.log" | head -n1)"
+            if [ -z "$this" ]; then
+              echo "ERROR: run $run produced no 'Item is invalid! age <N>ms' line" >&2
+              exit 1
+            fi
+            echo "run $run: crash age = ${this}ms"
+            if [ -z "$age" ]; then
+              age="$this"
+            elif [ "$this" != "$age" ]; then
+              echo "ERROR: non-deterministic crash age: run $run got ${this}ms, expected ${age}ms" >&2
+              exit 1
+            fi
+          done
+          echo "=== concurrency-fuzz: deterministic crash age ${age}ms across 3 runs ==="

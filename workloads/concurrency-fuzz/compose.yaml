@@ -1,0 +1,20 @@
+# Concurrency-fuzz workload: one container running the producer/consumer sample
+# until it crashes, then shutting the VM down. The in-kernel sched_ext fuzzing
+# scheduler is loaded by the guest at boot (scx-init); run.sh opts the sample in
+# by wrapping it in thread-fuzz (bind-mounted into the container by the guest),
+# which switches it into SCHED_EXT so it is fuzzed. Under bedrock's single vCPU +
+# deterministic emulated TSC the whole run replays from the getrandom stream that
+# drives the schedule.
+#
+# The image comes from images.tar (built by ./build.sh); never pulled.
+
+services:
+  fuzz:
+    image: bedrock/concurrency-fuzz:latest
+    pull_policy: never
+    container_name: fuzz
+    privileged: true  # Required for the VMCALL helper and for setting SCHED_EXT.
+    # No `pid: host` needed: thread-fuzz sets SCHED_EXT on the sample process
+    # directly, so the fuzzing scheduler governs it regardless of PID namespace;
+    # the container keeps its private one.
+    command: ["/usr/local/bin/run.sh"]

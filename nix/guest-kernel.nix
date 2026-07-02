@@ -41,6 +41,8 @@ let
       pkgs.perl
       pkgs.elfutils
       pkgs.openssl
+      # BTF generation (CONFIG_DEBUG_INFO_BTF) needs pahole.
+      pkgs.pahole
     ];
   } ''
     cp -r ${patchedSrc} src
@@ -145,6 +147,21 @@ let
     ./scripts/config --enable BPF_SYSCALL
     ./scripts/config --enable CGROUP_BPF
 
+    # sched_ext (CONFIG_SCHED_CLASS_EXT) plus BTF type info, so out-of-tree BPF
+    # schedulers such as the concurrency-fuzz workload can be loaded and use
+    # CO-RE against the guest kernel's /sys/kernel/btf/vmlinux. sched_ext is
+    # mutually exclusive with core scheduling, so turn that off. BTF generation
+    # needs pahole, which is in nativeBuildInputs here and in the kernel build.
+    ./scripts/config --disable SCHED_CORE
+    ./scripts/config --enable BPF_JIT
+    # DEBUG_INFO_BTF only sticks if debug info is actually generated, but the
+    # guest defconfig leaves the "Debug information" choice at NONE. Select the
+    # toolchain-default DWARF option, which selects DEBUG_INFO. We build LLVM=1,
+    # so clang emits DWARF5 and pahole (1.31) converts it to BTF.
+    ./scripts/config --enable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+    ./scripts/config --enable DEBUG_INFO_BTF
+    ./scripts/config --enable SCHED_CLASS_EXT
+
     # Disable unnecessary features
     ./scripts/config --disable SOUND
     ./scripts/config --disable DRM
@@ -154,6 +171,11 @@ let
     ./scripts/config --disable BLUETOOTH
 
     make LLVM=1 ARCH=x86 olddefconfig
+
+    # Fail the build if sched_ext or BTF did not stick (e.g. an unmet
+    # dependency made olddefconfig drop them).
+    grep -q '^CONFIG_SCHED_CLASS_EXT=y$' .config || { echo "ERROR: CONFIG_SCHED_CLASS_EXT not enabled"; exit 1; }
+    grep -q '^CONFIG_DEBUG_INFO_BTF=y$'  .config || { echo "ERROR: CONFIG_DEBUG_INFO_BTF not enabled"; exit 1; }
 
     cp .config $out
   '';
@@ -168,6 +190,10 @@ let
 
 in
 base.overrideAttrs (old: {
+  # pahole is needed at build time to emit BTF (CONFIG_DEBUG_INFO_BTF), which
+  # the in-guest CO-RE sched_ext scheduler relocates against at load time.
+  nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.pahole ];
+
   postPatch = (old.postPatch or "") + ''
     sed -i '2iLLVM=1' Makefile
   '';

@@ -55,6 +55,89 @@ let
     installPhase = "mkdir -p $out/bin && cp bedrock-file-store $out/bin/";
   };
 
+  # Manual-registration helper: thread-fuzz <cmd> switches itself to SCHED_EXT
+  # and execs the command, so the command and its descendants are governed by
+  # the fuzzing scheduler while everything else stays on the stock scheduler. It
+  # runs inside the workload container (wrapping the process to fuzz), so it is
+  # bind-mounted into every container via containers.conf below rather than baked
+  # into any image. Built static (like the other guest helpers) so the single
+  # binary can be bind-mounted with no library closure to carry along.
+  threadFuzz = pkgs.pkgsStatic.stdenv.mkDerivation {
+    name = "thread-fuzz";
+    dontUnpack = true;
+    buildPhase = "$CC -O2 -static -o thread-fuzz ${../guest/scx-fuzz/thread-fuzz.c}";
+    installPhase = "mkdir -p $out/bin && cp thread-fuzz $out/bin/";
+  };
+
+  # scx headers (sched_ext BPF headers + bundled vmlinux.h for CO-RE). Pinned to
+  # the same commit the workload image used to vendor, whose kfunc ABI matches
+  # the bedrock guest kernel (6.18). This is the commit tag v1.0.18 points to.
+  scxSrc = pkgs.fetchFromGitHub {
+    owner = "sched-ext";
+    repo = "scx";
+    rev = "5bff813ccc5e56d0dd628632e4ca355305e77d94";
+    hash = "sha256-RkTY7gDcKbkNUKl7NJDX3Ac/I+dRG1Gj8rRHynbbxUU=";
+  };
+
+  # The in-kernel concurrency-fuzz scheduler and its guest-side init service.
+  # Lives in the generic initrd (not in any workload image): the scheduler is a
+  # generic guest capability loaded once at boot, so it belongs to the guest,
+  # not to the workload.
+  #
+  # scx-init links libbpf dynamically (static libbpf needs static elfutils,
+  # which nixpkgs refuses to build); its runtime closure is pulled into the
+  # rootfs via closureInfo below, like the rest of the dynamically-linked guest
+  # userland (podman, crun, systemd).
+  #
+  # The BPF object is compiled CO-RE (-g for BTF); CO-RE relocations resolve at
+  # load time against the guest kernel's /sys/kernel/btf/vmlinux, so scx's
+  # bundled vmlinux.h need not match the guest exactly.
+  scxFuzz = pkgs.stdenv.mkDerivation {
+    name = "scx-fuzz";
+    src = ../guest/scx-fuzz;
+
+    nativeBuildInputs = [ pkgs.clang pkgs.bpftools pkgs.pkg-config ];
+    buildInputs = [ pkgs.libbpf pkgs.elfutils pkgs.zlib ];
+
+    # The nix cc-wrapper injects x86_64 hardening flags (-fstack-protector,
+    # -fzero-call-used-regs) that the bpf target rejects. Disable hardening for
+    # the whole derivation; the host helpers don't need it either. We keep the
+    # wrapped clang (not clang-unwrapped) so libc / kernel-uapi / libbpf headers
+    # are still on the include path via NIX_CFLAGS.
+    hardeningDisable = [ "all" ];
+
+    buildPhase = ''
+      runHook preBuild
+
+      # Compile the sched_ext BPF object. Include flags mirror scx's own
+      # bpf_includes (meson.build): the bundled vmlinux.h lives under
+      # scheds/vmlinux (+ a per-arch copy), not under scheds/include.
+      clang -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+        -I${pkgs.lib.getDev pkgs.libbpf}/include \
+        -I${scxSrc}/scheds/include \
+        -I${scxSrc}/scheds/include/bpf-compat \
+        -I${scxSrc}/scheds/include/lib \
+        -I${scxSrc}/scheds/vmlinux \
+        -I${scxSrc}/scheds/vmlinux/arch/x86 \
+        -Ibpf \
+        -c bpf/main.bpf.c -o main.bpf.o
+
+      # Generate the libbpf skeleton the init service includes.
+      bpftool gen skeleton main.bpf.o name fuzz_bpf > fuzz_bpf.skel.h
+
+      # Init service, dynamically linked against libbpf.
+      $CC -O2 -Ibpf -I. -o scx-init scx-init.c \
+        $(pkg-config --cflags --libs libbpf)
+
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      mkdir -p $out/bin
+      cp scx-init $out/bin/
+    '';
+  };
+
   # Guest kernel module that drives the deterministic I/O channel. Built
   # against the patched 6.18 guest kernel's headers so its kbuild
   # configuration (LLVM=1, no CONFIG_RUST, etc.) matches what the running
@@ -218,7 +301,12 @@ let
     ignoreCollisions = true;
   };
 
-  closureInfo = pkgs.closureInfo { rootPaths = [ runtimeEnv ]; };
+  # scxFuzz is added explicitly so its runtime closure (libbpf, elfutils, zlib,
+  # glibc) is copied into the rootfs: scx-init is dynamically linked and
+  # referenced by store path, not via runtimeEnv. threadFuzz is added so its
+  # store path (bind-mounted into containers by containers.conf below) lands in
+  # the rootfs too.
+  closureInfo = pkgs.closureInfo { rootPaths = [ runtimeEnv scxFuzz threadFuzz ]; };
 
   # Containers.conf with absolute Nix store paths so podman finds its helpers
   # regardless of PATH or wrapper behaviour.
@@ -237,16 +325,27 @@ let
     #     `eventually_` drivers); and
     #   - the coverage dir, where each instrumented process keeps its feedback
     #     bitmap as a file (see guest/libfeedback.c), so the pages outlive the
-    #     container that produced them.
-    # Each source must exist (the initrd pre-creates them) before a container
-    # starts, else podman bind-mounts an auto-created path in its place.
+    #     container that produced them; and
+    #   - thread-fuzz, the manual-registration helper (read-only): a workload
+    #     opts a process into the fuzzing scheduler by wrapping it, e.g.
+    #     `thread-fuzz /usr/local/bin/queue`. Mounting it here (from the guest
+    #     store path) makes it available in every container with no per-image
+    #     build; it does nothing unless a workload actually invokes it.
+    # Each source must exist (the initrd pre-creates them, and the store path is
+    # in the rootfs) before a container starts, else podman bind-mounts an
+    # auto-created path in its place.
     volumes = [
       "/bedrock/assertions.jsonl:/bedrock/assertions.jsonl",
       "/bedrock/coverage:/bedrock/coverage",
+      "${threadFuzz}/bin/thread-fuzz:/usr/local/bin/thread-fuzz:ro",
     ]
 
     [engine]
     cgroup_manager = "cgroupfs"
+    # Stock crun. The fuzzing scheduler is opt-in per workload: a container's
+    # command wraps the process to fuzz in thread-fuzz (bind-mounted above),
+    # which switches that process into SCHED_EXT so scx-init's scheduler governs
+    # it while everything else stays on the stock scheduler.
     runtime = "crun"
 
     [engine.runtimes]
@@ -342,6 +441,11 @@ pkgs.stdenv.mkDerivation {
 
     # bedrock-file-store at /usr/local/bin/.
     ln -sf ${bedrockFileStore}/bin/bedrock-file-store rootfs/usr/local/bin/bedrock-file-store
+
+    # scx-init at /usr/local/bin/ so the init script can start the in-kernel
+    # fuzzing scheduler at boot. thread-fuzz needs no rootfs symlink: it runs
+    # inside containers and is bind-mounted there by store path (containers.conf).
+    ln -sf ${scxFuzz}/bin/scx-init rootfs/usr/local/bin/scx-init
 
     # workload-monitor: watches podman container/exec lifecycle events and
     # records exit-code assertions to /bedrock/assertions.jsonl. Lives on the
