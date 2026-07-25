@@ -147,13 +147,24 @@ impl Checkpoint {
         let mut file_server = FileServer::new(std::mem::take(&mut opts.files));
         // Capture guest console output as `Serial` event records during boot,
         // the same channel branches use; the root VM gets reserved `BranchId(0)`.
-        vm.set_event_config(&VmEventConfig::enabled(EventCategories::SERIAL))
-            .map_err(|source| {
-                LabError::Vm(VmError::Ioctl {
-                    operation: "SET_EVENT_CONFIG",
-                    source,
-                })
-            })?;
+        //
+        // `BEDROCK_IGNORE_LATE_INJECT` (any non-empty value) tolerates a late
+        // APIC-timer injection during this boot instead of aborting, mirroring
+        // bedrock-cli so the same env var is the one bypass across every entry
+        // point. The boot to the ready checkpoint is throwaway setup and its
+        // heavy early-boot phase can deliver a timer late; branches forked from
+        // the checkpoint set their own capture config, so the leniency is scoped
+        // to the setup boot -- a late inject inside scored work is still caught.
+        let mut boot_config = VmEventConfig::enabled(EventCategories::SERIAL);
+        if std::env::var_os("BEDROCK_IGNORE_LATE_INJECT").is_some_and(|v| !v.is_empty()) {
+            boot_config = boot_config.with_ignore_late_inject();
+        }
+        vm.set_event_config(&boot_config).map_err(|source| {
+            LabError::Vm(VmError::Ioctl {
+                operation: "SET_EVENT_CONFIG",
+                source,
+            })
+        })?;
         vm.set_stop_at_tsc(Some(deadline.instructions()))?;
         let mut partial_line = PartialLine::default();
         loop {

@@ -67,6 +67,27 @@ pub struct ApicState {
     /// TSC value when timer should fire (0 = timer not running).
     /// This is internal state, not a real APIC register.
     pub timer_deadline: u64,
+    /// Instructions between deterministic forced preemptions (0 = disabled).
+    ///
+    /// Not a real APIC register. Drives *instruction-granular preemption*: an
+    /// extra interrupt (the LVT timer vector) is injected roughly every
+    /// `preempt_period` retired instructions, giving the guest scheduler a
+    /// preemption point at an arbitrary instruction rather than only at its
+    /// natural entries (timer tick / syscall / yield). That lets the seeded
+    /// scheduler place a context switch inside a race window that has no
+    /// scheduler entry between the two conflicting accesses -- interleavings a
+    /// single core with the in-guest scheduler alone can never reach.
+    pub preempt_period: u64,
+    /// Dedicated xorshift64 stream for per-interval preemption jitter, kept
+    /// separate from the RDRAND PRNG so forcing preemptions never perturbs the
+    /// randomness the guest observes. Internal state, not an APIC register.
+    pub preempt_seed: u64,
+    /// Emulated-TSC (retired-instruction) count of the next forced preemption
+    /// (0 = not yet armed). Fired on the first deterministic exit at or after
+    /// this count (see `check_preempt`); unlike `timer_deadline` it is NOT armed
+    /// on the per-CPU PEBS counter, so it never competes with the APIC timer's
+    /// precise landing. Internal state, not an APIC register.
+    pub preempt_deadline: u64,
 }
 
 impl Default for ApicState {
@@ -97,7 +118,40 @@ impl Default for ApicState {
             timer_initial: 0,
             timer_divide: 0,
             timer_deadline: 0,
+            // Instruction-granular preemption disabled by default; enabled by
+            // `configure_preempt`. Guests are unaffected until then.
+            preempt_period: 0,
+            preempt_seed: 0,
+            preempt_deadline: 0,
         }
+    }
+}
+
+impl ApicState {
+    /// Enable deterministic instruction-granular preemption: inject an extra
+    /// interrupt (the LVT timer vector) roughly every `period` retired
+    /// instructions, with per-interval jitter drawn from `seed`. `period == 0`
+    /// disables the feature. A zero `seed` is forced to 1, since 0 is a fixed
+    /// point of the xorshift PRNG. The first deadline is armed lazily on the
+    /// next injection pass (`check_preempt`), so this needn't know the current
+    /// emulated TSC.
+    pub fn configure_preempt(&mut self, period: u64, seed: u64) {
+        self.preempt_period = period;
+        self.preempt_seed = if seed == 0 { 1 } else { seed };
+        self.preempt_deadline = 0;
+    }
+
+    /// Advance the preemption-interval PRNG and return the gap, in retired
+    /// instructions, until the next forced preemption. Range `[period,
+    /// 2*period)`. Caller guarantees `preempt_period != 0` (checked in
+    /// `check_preempt` before this is reached), so the modulo is safe.
+    pub fn next_preempt_interval(&mut self) -> u64 {
+        let mut x = self.preempt_seed;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.preempt_seed = x;
+        self.preempt_period + (x % self.preempt_period)
     }
 }
 
@@ -132,6 +186,9 @@ impl StateHash for ApicState {
         h.write_u32(self.timer_initial);
         h.write_u32(self.timer_divide);
         h.write_u64(self.timer_deadline);
+        h.write_u64(self.preempt_period);
+        h.write_u64(self.preempt_seed);
+        h.write_u64(self.preempt_deadline);
         h.finish()
     }
 }

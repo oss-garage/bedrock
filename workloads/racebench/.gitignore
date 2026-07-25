@@ -1,0 +1,11 @@
+images.tar
+
+# Staged by build.sh from guest/libvmcall.h into the Docker build context
+# (single source of truth lives at guest/libvmcall.h). Normally removed on
+# exit; ignored here in case a build is interrupted before cleanup.
+fuzz/libvmcall.h
+
+# The RaceBench target corpus is not vendored: fuzz/fetch_targets.sh downloads
+# it into fuzz/targets/ at build time, pinned to an upstream commit. Nothing
+# under targets/ is committed (program source, inputs, or build outputs).
+fuzz/targets/

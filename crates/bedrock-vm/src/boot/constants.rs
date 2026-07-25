@@ -81,6 +81,12 @@ pub mod defaults {
     // instead of one VMX I/O exit per byte through the emulated 8250.
     // earlyprintk=serial still handles the early-boot window (before the
     // module loads) through the 8250; that output is bounded and fine.
-    pub const CMDLINE: &str = "console=hvc0 nopti nokaslr mitigations=off break audit=0";
+    // vdso=0 disables the userspace vDSO clock (arch_setup_additional_pages skips
+    // mapping it), forcing clock_gettime/gettimeofday through the trapped syscall
+    // path so guest time is the deterministic emulated TSC, not a raw userspace
+    // TSC read. Without this, userspace clock reads (the fuzzing scheduler's log
+    // stamps, the workloads' own timing) see a non-deterministic host TSC and the
+    // guest schedule diverges under fuzzing perturbation.
+    pub const CMDLINE: &str = "console=hvc0 nopti nokaslr mitigations=off break audit=0 vdso=0";
     pub const RDRAND_SEED: u64 = 0x12345678_deadbeef;
 }

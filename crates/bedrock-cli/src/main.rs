@@ -225,7 +225,53 @@ fn build_event_config(args: &Args) -> EventConfig {
     if args.intercept_pf {
         config = config.with_intercept_pf();
     }
+    // Opt out of the strict PEBS-margin abort: with this set, a skid past the
+    // host margin is only recorded (`max_pebs_skid`) instead of aborting the
+    // run mid-flight. Any non-empty value enables the old best-effort behavior.
+    if std::env::var_os("BEDROCK_IGNORE_PEBS_MARGIN").is_some_and(|v| !v.is_empty()) {
+        config = config.with_ignore_pebs_margin();
+    }
+    // Opt out of the strict late-inject abort: with this set, an APIC timer
+    // delivered past its deadline is only recorded (`apic_timer_late_inject`)
+    // instead of aborting the run. Separate knob from the PEBS-margin one, since
+    // a late inject can arise without a skid past the margin. Any non-empty
+    // value enables the old best-effort behavior.
+    if std::env::var_os("BEDROCK_IGNORE_LATE_INJECT").is_some_and(|v| !v.is_empty()) {
+        config = config.with_ignore_late_inject();
+    }
+    // Instruction-granular preemption (determinism-preserving): inject an extra
+    // interrupt every ~BEDROCK_PREEMPT_PERIOD retired instructions so the guest
+    // scheduler gets a preemption point at an arbitrary instruction, not only at
+    // its natural entries (tick/syscall/yield). Unset or 0 leaves the feature
+    // off, so guests are unaffected. The interval seed defaults to the RDRAND
+    // seed so a per-fork seed sweep also sweeps preemption placement; set
+    // BEDROCK_PREEMPT_SEED to decouple the two.
+    if let Some(period) = env_u64("BEDROCK_PREEMPT_PERIOD").filter(|&p| p != 0) {
+        let seed = env_u64("BEDROCK_PREEMPT_SEED").unwrap_or(args.rdrand_seed);
+        config = config.with_preempt(period, seed);
+    }
     config
+}
+
+/// Parse a `BEDROCK_*` env var as a u64 (decimal, or hex with a `0x` prefix).
+/// Returns `None` when unset/empty; logs and returns `None` on a parse error.
+fn env_u64(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let v = raw.trim();
+    if v.is_empty() {
+        return None;
+    }
+    let parsed = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => v.parse::<u64>(),
+    };
+    match parsed {
+        Ok(n) => Some(n),
+        Err(_) => {
+            warn!("ignoring {}: not a valid u64 ('{}')", name, v);
+            None
+        }
+    }
 }
 
 /// Parse a comma-separated list of event categories into a mask.
@@ -558,7 +604,22 @@ fn run() -> io::Result<()> {
                         continue;
                     }
                     ExitKind::VmcallReady => {
-                        info!("VM ready (VMCALL hypercall) at tsc {}", exit.emulated_tsc);
+                        let vm_id = vm.get_vm_id().unwrap_or(0);
+                        info!(
+                            "VM ready (VMCALL hypercall) at tsc {}, vm_id={}",
+                            exit.emulated_tsc, vm_id
+                        );
+                        // With `--wait`, hold the VM alive at this post-boot
+                        // checkpoint so forked children (`--parent-id <vm_id>`,
+                        // each re-seeded) can branch from here and run the
+                        // workload under their own schedule. The boot is paid
+                        // once and shared via copy-on-write. Without `--wait`
+                        // (the plain cold-boot path) just continue into the
+                        // workload as before.
+                        if args.wait {
+                            maybe_wait_for_ctrl_c(true);
+                            break;
+                        }
                         continue;
                     }
                     ExitKind::FileFetch => {
@@ -608,6 +669,22 @@ fn run() -> io::Result<()> {
                 log::error!("VM run failed: {}", e);
                 if let Ok(regs) = vm.get_regs() {
                     log::error!("  RIP: {:#018x}, RFLAGS: {:#018x}", regs.rip, regs.rflags);
+                }
+                if let Ok(stats) = vm.get_exit_stats() {
+                    if stats.pebs_margin_abort_skid != 0 {
+                        log::error!(
+                            "  PEBS-margin abort: skid {} exceeded host margin {} (set BEDROCK_IGNORE_PEBS_MARGIN to bypass)",
+                            stats.pebs_margin_abort_skid,
+                            stats.pebs_margin_abort_margin,
+                        );
+                    }
+                    if stats.late_inject_abort_lateness != 0 {
+                        log::error!(
+                            "  Late-inject abort: APIC timer fired {} past deadline {} (set BEDROCK_IGNORE_LATE_INJECT to bypass)",
+                            stats.late_inject_abort_lateness,
+                            stats.late_inject_abort_deadline,
+                        );
+                    }
                 }
                 return Err(io::Error::other(e.to_string()));
             }

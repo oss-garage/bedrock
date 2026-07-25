@@ -1,0 +1,21 @@
+# RaceBench workload: one container that runs a small corpus of real concurrent
+# programs (PARSEC kernels) with pre-injected, self-observing concurrency bugs,
+# each under the in-kernel sched_ext fuzzing scheduler, then shuts the VM down.
+#
+# The fuzzing scheduler is loaded by the guest at boot (scx-init); run.sh opts
+# each target in by wrapping it in thread-fuzz (bind-mounted into the container
+# by the guest), which switches it into SCHED_EXT so it is fuzzed. When a bug's
+# interleaving fires the target abort()s (SIGABRT) and records the bug id - a
+# self-observable crash, no external race detector. Under bedrock's single vCPU
+# + deterministic emulated TSC the whole run replays from the getrandom stream
+# that drives the schedule; vary that stream across boots to explore.
+#
+# The image comes from images.tar (built by ./build.sh); never pulled.
+
+services:
+  fuzz:
+    image: bedrock/racebench:latest
+    pull_policy: never
+    container_name: fuzz
+    privileged: true  # Required for the VMCALL helper and for setting SCHED_EXT.
+    command: ["/usr/local/bin/run.sh"]

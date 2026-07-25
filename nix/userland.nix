@@ -4,13 +4,21 @@
 let
   src = pkgs.lib.cleanSourceWith {
     src = ./..;
+    # Only the Rust workspace affects these binaries. Exclude non-cargo dirs and
+    # docs so unrelated repo churn -- e.g. run output saved under workloads/, a
+    # rebuilt images.tar, or a README edit -- does not bump the input hash and
+    # force a needless rebuild. Keep in sync with the workload-monitor filter in
+    # podman-initrd.nix.
     filter = path: type:
       let baseName = builtins.baseNameOf path; in
-      # Exclude kernel module build artifacts and non-cargo dirs
       !(baseName == "target" ||
         baseName == ".git" ||
         baseName == ".claude" ||
+        baseName == ".github" ||
         baseName == "nix" ||
+        baseName == "workloads" ||
+        baseName == "contrib" ||
+        pkgs.lib.hasSuffix ".md" baseName ||
         # Exclude the kernel module crate (no Cargo.toml, breaks workspace)
         (type == "directory" && baseName == "bedrock" &&
          builtins.match ".*/crates/bedrock$" path != null));

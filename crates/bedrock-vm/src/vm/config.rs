@@ -32,6 +32,18 @@ pub const EXIT_REASON_CHECKPOINT: u32 = 0xFFFFFFFF;
 pub const EXIT_FLAG_NO_MEMORY_HASH: u32 = 1 << 0;
 /// Bit flag: intercept guest #PF exceptions for determinism analysis.
 pub const EXIT_FLAG_INTERCEPT_PF: u32 = 1 << 1;
+/// Bit flag: tolerate a PEBS skid larger than the host margin instead of
+/// aborting the run. Absent (the default) means a skid past the margin is
+/// fatal, since the armed deadline would be delivered late and break
+/// determinism.
+pub const EXIT_FLAG_IGNORE_PEBS_MARGIN: u32 = 1 << 2;
+/// Bit flag: tolerate a late APIC-timer injection (the interrupt delivered on
+/// an exit past its deadline) instead of aborting the run. Absent (the default)
+/// means a late inject is fatal, since it means the timer landed at a different
+/// instruction than the deadline and guest execution diverges. Separate from
+/// [`EXIT_FLAG_IGNORE_PEBS_MARGIN`]: a skid past the margin is one cause of a
+/// late inject, but the timer can also arrive late through other misses.
+pub const EXIT_FLAG_IGNORE_LATE_INJECT: u32 = 1 << 3;
 
 /// Unified event-stream configuration passed to the kernel via ioctl.
 ///
@@ -66,6 +78,13 @@ pub struct EventConfig {
     /// Universal start threshold — no `Exit` records until emulated_tsc reaches
     /// this value. 0 = capture from the start.
     pub exit_start_tsc: u64,
+    /// Instruction-granular preemption period: retired instructions between
+    /// deterministic forced preemptions. 0 (the default) disables the feature.
+    /// See `ApicState::configure_preempt` in bedrock-vmx.
+    pub preempt_period: u64,
+    /// Seed for the preemption-interval jitter PRNG (only meaningful when
+    /// `preempt_period != 0`). A dedicated stream, separate from RDRAND.
+    pub preempt_seed: u64,
 }
 
 impl EventConfig {
@@ -108,6 +127,31 @@ impl EventConfig {
     /// Intercept guest #PF exceptions for determinism analysis.
     pub fn with_intercept_pf(mut self) -> Self {
         self.exit_flags |= EXIT_FLAG_INTERCEPT_PF;
+        self
+    }
+
+    /// Tolerate a PEBS skid larger than the host margin (the old best-effort
+    /// behavior). Without this, such a skid aborts the run immediately.
+    pub fn with_ignore_pebs_margin(mut self) -> Self {
+        self.exit_flags |= EXIT_FLAG_IGNORE_PEBS_MARGIN;
+        self
+    }
+
+    /// Tolerate a late APIC-timer injection (the old best-effort behavior).
+    /// Without this, a timer delivered past its deadline aborts the run
+    /// immediately.
+    pub fn with_ignore_late_inject(mut self) -> Self {
+        self.exit_flags |= EXIT_FLAG_IGNORE_LATE_INJECT;
+        self
+    }
+
+    /// Enable deterministic instruction-granular preemption: inject an extra
+    /// interrupt roughly every `period` retired instructions (0 = disabled),
+    /// with per-interval jitter drawn from `seed`. See
+    /// `ApicState::configure_preempt` in bedrock-vmx.
+    pub fn with_preempt(mut self, period: u64, seed: u64) -> Self {
+        self.preempt_period = period;
+        self.preempt_seed = seed;
         self
     }
 

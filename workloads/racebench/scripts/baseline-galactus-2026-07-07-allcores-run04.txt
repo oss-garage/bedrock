@@ -1,0 +1,5 @@
+--- native baseline: image=bedrock/racebench:latest cpuset=all plateau=500 ---
+blackscholes: reached 3/20 in 1264 runs -> bug_ids: 6 19 0
+streamcluster: reached 8/20 in 1329 runs -> bug_ids: 3 12 13 9 15 16 6 11
+fluidanimate: reached 5/20 in 1584 runs -> bug_ids: 4 7 17 11 2
+TOTAL native baseline: 16/60

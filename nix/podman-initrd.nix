@@ -239,12 +239,22 @@ let
     version = "0.1.0";
     src = pkgs.lib.cleanSourceWith {
       src = ./..;
+      # Only the Rust workspace affects this binary. Exclude everything else so a
+      # change under workloads/ (e.g. a night-run log tee'd into
+      # workloads/racebench/scripts/, or a rebuilt images.tar), contrib/, CI
+      # config, or docs does NOT bump this derivation's input hash -- otherwise it
+      # rebuilds, the rootfs rebuilds with it, and the guest image changes out
+      # from under an in-flight repro.
       filter = path: type:
         let baseName = builtins.baseNameOf path; in
         !(baseName == "target" ||
           baseName == ".git" ||
           baseName == ".claude" ||
+          baseName == ".github" ||
           baseName == "nix" ||
+          baseName == "workloads" ||
+          baseName == "contrib" ||
+          pkgs.lib.hasSuffix ".md" baseName ||
           (type == "directory" && baseName == "bedrock" &&
            builtins.match ".*/crates/bedrock$" path != null));
     };
@@ -507,6 +517,20 @@ pkgs.stdenv.mkDerivation {
 
   installPhase = ''
     cd rootfs
-    find . -print0 | cpio --null -o -H newc | gzip -9 > $out
+    # Byte-reproducible initramfs, so a rebuild produces an identical guest image.
+    # A normal (input-addressed) rebuild -- triggered by any tracked source change
+    # -- must yield the same bytes, or the guest boots to a different ready state
+    # and silently breaks (boot_seed, child_seed) reproducibility for forked runs.
+    # Three non-determinism sources are pinned:
+    #   - mtimes: build-created files (init, configs) carry build-time mtimes;
+    #     normalize every entry (incl. symlinks, -h) to the epoch.
+    #   - member order: `find` walks in filesystem order; sort it (LC_ALL=C).
+    #   - inode/dev numbers + gzip timestamp: `cpio --reproducible` renumbers
+    #     inodes deterministically (preserving hardlink groups) and zeroes dev;
+    #     `gzip -n` drops the timestamp/name from the gzip header.
+    find . -exec touch -h --date=@0 {} +
+    find . -print0 | LC_ALL=C sort -z \
+      | cpio --null --create --format=newc --reproducible \
+      | gzip -9n > $out
   '';
 }

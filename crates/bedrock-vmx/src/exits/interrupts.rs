@@ -28,6 +28,10 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+#[cfg(test)]
+#[path = "interrupts_tests.rs"]
+mod tests;
+
 /// Check if APIC timer has expired and set IRR bit if so.
 /// Uses emulated TSC for determinism.
 pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
@@ -54,8 +58,25 @@ pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
     // anything strictly greater means PEBS didn't fire at the
     // `target - PEBS_MARGIN` point and the timer is being delivered late
     // on whatever deterministic exit happened past the deadline.
+    //
+    // A late inject breaks determinism: the timer lands at a different
+    // instruction than the deadline, so the guest sees the interrupt at the
+    // wrong point. Unless the run opted into tolerating it
+    // (BEDROCK_IGNORE_LATE_INJECT / EXIT_FLAG_IGNORE_LATE_INJECT), record the
+    // abort figures and return without setting IRR: `inject_pending_interrupt`
+    // reads the recorded lateness and tears the run down. This mirrors the
+    // strict PEBS-margin abort in `handle_pebs_precise_exit`, but catches the
+    // late delivery at the injection point even when the skid path didn't fire.
     if current_tsc > timer_deadline {
         ctx.state_mut().exit_stats.apic_timer_late_inject += 1;
+        if !ctx.state().ignore_late_inject {
+            let lateness = (current_tsc as i64) - (timer_deadline as i64);
+            let stats = &mut ctx.state_mut().exit_stats;
+            // Set only here, so a non-zero value uniquely identifies this abort.
+            stats.late_inject_abort_lateness = lateness;
+            stats.late_inject_abort_deadline = timer_deadline as i64;
+            return;
+        }
     }
 
     let apic = &mut ctx.state_mut().devices.apic;
@@ -93,6 +114,80 @@ pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
     let _ = ctx
         .state_mut()
         .event_append(EventKind::Inject, payload.as_bytes());
+}
+
+/// Deterministic instruction-granular preemption.
+///
+/// The in-guest scheduler only runs, and so only switches threads, when it is
+/// entered: a timer tick, a syscall, a block/yield. A data race whose two
+/// conflicting accesses have no scheduler entry between them is therefore never
+/// interleaved -- the racing thread runs that stretch to completion on every
+/// run and every seed, so sweeping the seed cannot expose the bug. This injects
+/// an *extra* interrupt roughly every `preempt_period` retired instructions,
+/// handing the guest scheduler a preemption point it would not otherwise have.
+///
+/// It fires on the first deterministic exit at or after `preempt_deadline`.
+/// Because this runs only on the `last_exit_deterministic` path, that firing
+/// point is reproducible across runs -- a pure function of the seed -- so
+/// determinism holds WITHOUT arming the single per-CPU PEBS counter. Keeping
+/// preemption out of the PEBS/MTF precise-landing machinery is deliberate: an
+/// earlier version armed PEBS for the preempt deadline too, which stole the
+/// counter from the real APIC timer (usually the farther target) and made the
+/// timer deliver late -- fatal under a strict scored run, where every RaceBench
+/// fork aborted. The tradeoff is coarser placement: preemption lands at the next
+/// deterministic-exit boundary, not an exact instruction, so it cannot switch
+/// inside a long exit-free stretch.
+///
+/// Disabled unless `apic.preempt_period != 0`. Reuses the guest's LVT timer
+/// vector, i.e. a forced preemption looks to the guest like an extra timer tick
+/// (empirically this does drive reschedules under the sched_ext workload).
+fn check_preempt<C: VmContext>(ctx: &mut C) {
+    let apic = &ctx.state().devices.apic;
+    if apic.preempt_period == 0 {
+        return; // feature disabled
+    }
+    // Only inject once the guest has wired up a usable LVT timer vector: APIC
+    // software-enabled (SVR bit 8), the LVT entry unmasked (bit 16 clear), and
+    // a deliverable vector (>= 16). Before that (early boot) the injection
+    // would target a reserved or masked vector and be dropped, and the deadline
+    // would never advance. `next_preempt_target_tsc` gates on the same
+    // conditions, so PEBS doesn't arm for a preemption we would refuse to fire.
+    if (apic.svr & (1 << 8)) == 0 {
+        return;
+    }
+    if (apic.lvt_timer & (1 << 16)) != 0 {
+        return;
+    }
+    let vector = (apic.lvt_timer & 0xFF) as u8;
+    if vector < 16 {
+        return;
+    }
+
+    let current_tsc = ctx.state().emulated_tsc;
+    let deadline = ctx.state().devices.apic.preempt_deadline;
+
+    // Lazy arm: on the first eligible pass, schedule the first preemption and
+    // return. `arm_for_next_iteration` (called just after us) reads the freshly
+    // set deadline and arms PEBS for it.
+    if deadline == 0 {
+        let apic = &mut ctx.state_mut().devices.apic;
+        let interval = apic.next_preempt_interval();
+        apic.preempt_deadline = current_tsc.saturating_add(interval);
+        return;
+    }
+
+    if current_tsc < deadline {
+        return;
+    }
+
+    // Due: raise the vector in IRR (idempotent if a real timer fires on the
+    // same instruction -- both set the same bit) and schedule the next one.
+    let irr_index = (vector / 32) as usize;
+    let irr_bit = 1u32 << (vector % 32);
+    let apic = &mut ctx.state_mut().devices.apic;
+    apic.irr[irr_index] |= irr_bit;
+    let interval = apic.next_preempt_interval();
+    apic.preempt_deadline = current_tsc.saturating_add(interval);
 }
 
 /// Check whether an I/O channel request is queued and not yet delivered to
@@ -331,6 +426,11 @@ pub fn inject_pending_interrupt<C: VmContext>(ctx: &mut C) -> Result<(), ExitErr
                 // higher priority) wins selection in `apic_pending_vector`
                 // and ours queues behind it via the sticky IRR bit.
                 check_io_channel(ctx);
+                // Raise a forced-preemption interrupt at the seed-chosen
+                // instruction count (no-op unless preemption is configured).
+                // Uses the LVT timer vector, so it shares the sticky IRR bit
+                // with a real timer firing on the same instruction.
+                check_preempt(ctx);
                 true
             }
         };
@@ -347,6 +447,19 @@ pub fn inject_pending_interrupt<C: VmContext>(ctx: &mut C) -> Result<(), ExitErr
     // every VM-exit, unlike `emulated_tsc` which only updates on deterministic
     // exits) and keeps the precise emulated_tsc landing point intact.
     arm_for_next_iteration(ctx);
+
+    // A late APIC-timer injection (recorded by `check_apic_timer` above) means
+    // the timer was delivered past its deadline and the run has diverged. Tear
+    // it down here so the failure surfaces at the source. handle_run collapses
+    // every VmRunError to EIO, so the `late_inject_abort_*` stats are the
+    // reliable channel: userspace reads them back over GET_EXIT_STATS on the
+    // failure path and renders the message there. Only reachable in strict
+    // mode: `check_apic_timer` leaves the stat at 0 when `ignore_late_inject`.
+    if ctx.state().exit_stats.late_inject_abort_lateness != 0 {
+        return Err(ExitError::Fatal(
+            "APIC timer injected late (set BEDROCK_IGNORE_LATE_INJECT to bypass)",
+        ));
+    }
 
     if !inject_eligible {
         return Ok(());

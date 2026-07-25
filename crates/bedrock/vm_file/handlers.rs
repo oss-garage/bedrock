@@ -535,6 +535,23 @@ pub(crate) fn handle_set_event_config<F: VmFileOps>(vm_file: &mut F, arg: usize)
     state.set_exit_start_tsc(config.exit_start_tsc);
     state.skip_memory_hash = (config.exit_flags & 1) != 0;
     state.set_intercept_pf((config.exit_flags & 2) != 0);
+    // Bit 2 (EXIT_FLAG_IGNORE_PEBS_MARGIN): tolerate PEBS skid > margin instead
+    // of aborting the run. Absent (the default) means strict: a skid past the
+    // margin is fatal.
+    state.ignore_pebs_margin = (config.exit_flags & 4) != 0;
+    // Bit 3 (EXIT_FLAG_IGNORE_LATE_INJECT): tolerate a late APIC-timer inject
+    // instead of aborting the run. Absent (the default) means strict: a timer
+    // delivered past its deadline is fatal.
+    state.ignore_late_inject = (config.exit_flags & 8) != 0;
+    // Instruction-granular preemption: inject an extra interrupt every
+    // ~preempt_period retired instructions (0 = disabled) so the guest scheduler
+    // gets a preemption point at an arbitrary instruction, not only at its
+    // natural entries. Applied to the (possibly fork-inherited) APIC; period 0
+    // disables it on this VM.
+    state
+        .devices
+        .apic
+        .configure_preempt(config.preempt_period, config.preempt_seed);
 
     log_info!(
         "SET_EVENT_CONFIG: enabled={}, categories={:#x}, exit_trigger={:?}, exit_flags={:#x} for VM {}\n",
@@ -588,6 +605,10 @@ pub(crate) fn handle_get_exit_stats<F: VmFileOps>(vm_file: &F, arg: usize) -> is
         pebs_armed_iter_no_fire: stats.pebs_armed_iter_no_fire,
         apic_timer_late_inject: stats.apic_timer_late_inject,
         max_pebs_skid: stats.max_pebs_skid,
+        pebs_margin_abort_skid: stats.pebs_margin_abort_skid,
+        pebs_margin_abort_margin: stats.pebs_margin_abort_margin,
+        late_inject_abort_lateness: stats.late_inject_abort_lateness,
+        late_inject_abort_deadline: stats.late_inject_abort_deadline,
     };
 
     // SAFETY: `arg` is a user-provided pointer from the ioctl syscall, and `exit_stats`

@@ -221,6 +221,11 @@ pub(crate) struct BedrockEventConfig {
     /// Universal start threshold — no `Exit` records until TSC reaches this
     /// value. 0 = capture from the start.
     pub exit_start_tsc: u64,
+    /// Instruction-granular preemption period: retired instructions between
+    /// deterministic forced preemptions. 0 = disabled.
+    pub preempt_period: u64,
+    /// Seed for the preemption-interval jitter PRNG.
+    pub preempt_seed: u64,
 }
 
 /// Per-exit-type statistics for userspace.
@@ -297,6 +302,15 @@ pub(crate) struct BedrockExitStats {
     pub apic_timer_late_inject: u64,
     /// Largest PEBS skid this run; minimum safe `margin_for_host_cpu()` value.
     pub max_pebs_skid: i64,
+    /// Skid that tripped the strict PEBS-margin abort, or 0 if no abort.
+    pub pebs_margin_abort_skid: i64,
+    /// Host margin in effect at the strict PEBS-margin abort, or 0 if no abort.
+    pub pebs_margin_abort_margin: i64,
+    /// TSC counts past the deadline that tripped the late-inject abort, or 0 if
+    /// no abort.
+    pub late_inject_abort_lateness: i64,
+    /// The deadline missed by the late-inject abort, or 0 if no abort.
+    pub late_inject_abort_deadline: i64,
 }
 
 /// VM exit information returned to userspace from RUN ioctl.
