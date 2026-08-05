@@ -1,0 +1,37 @@
+From: Bedrock <bedrock@example.com>
+Subject: [PATCH 5/5] x86/mm: flush TLB on permission upgrade in
+ ptep_set_access_flags
+
+When attempting to write to a CoW'd page, wp_page_reuse adds the
+write permission via ptep_set_access_flags. Intel SDM Volume 3A
+subsection 5.10.4.1 states that #PF does invalidate the TLB entry.
+Assuming the SDM and Ice Lake are both correct, something else
+non-deterministically re-populates the TLB with this read-only
+page before the call to set_pte makes the pte writable. This
+causes a spurious fault causing more instructions to be executed
+which eventually affects the timestamp and eventually cascades
+to other fields. Fix this by flushing the TLB after updating the
+permission.
+
+Signed-off-by: Bedrock <bedrock@example.com>
+---
+ arch/x86/mm/pgtable.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletions(-)
+
+diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+--- a/arch/x86/mm/pgtable.c
++++ b/arch/x86/mm/pgtable.c
+@@ -394,8 +394,10 @@
+ {
+ 	int changed = !pte_same(*ptep, entry);
+ 
+-	if (changed && dirty)
++	if (changed && dirty) {
+ 		set_pte(ptep, entry);
++		flush_tlb_page(vma, address);
++	}
+ 
+ 	return changed;
+ }
+-- 
+2.39.0
