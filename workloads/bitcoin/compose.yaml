@@ -33,7 +33,6 @@ services:
       - -fallbackfee=0.0001
       - -printtoconsole
       - -debug
-      - -debugexclude=libevent
       - -debugexclude=leveldb
 
   bitcoind2:
@@ -55,7 +54,6 @@ services:
       - -printtoconsole
       - -addnode=bitcoind1:18444
       - -debug
-      - -debugexclude=libevent
       - -debugexclude=leveldb
     depends_on:
       - bitcoind1
