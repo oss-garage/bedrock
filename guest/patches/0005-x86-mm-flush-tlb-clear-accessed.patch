@@ -1,0 +1,52 @@
+From: Bedrock <bedrock@example.com>
+Subject: [PATCH] x86/mm: Flush the TLB when clearing the Accessed bit
+
+For deterministic execution under bedrock. x86 clears a PTE's (or PMD's)
+Accessed bit in ptep_test_and_clear_young() / pmdp_test_and_clear_young()
+without flushing the TLB; ptep_clear_flush_young() deliberately skips the
+flush as a performance optimization. The CPU sets Accessed again only on a
+page walk, i.e. on a TLB miss, so whether the bit is set at the next look
+depends on whether the stale translation survived in the hardware TLB.
+That is outside the guest's control and is not reproduced by a replay.
+
+The kernel branches on the bit afterwards. For example, zap_pte_range()
+tests pte_young() and calls folio_mark_accessed() while unmapping.
+
+Flush the affected translation whenever the bit was actually cleared, so
+the next access always walks the page tables and sets Accessed again.
+Callers reached via /proc/<pid>/clear_refs, reclaim and MGLRU aging all
+go through these two helpers, so this covers ptep_clear_flush_young() and
+pmdp_clear_flush_young() as well.
+
+Signed-off-by: Bedrock <bedrock@example.com>
+---
+ arch/x86/mm/pgtable.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+index 4a105f2..cee80b2 100644
+--- a/arch/x86/mm/pgtable.c
++++ b/arch/x86/mm/pgtable.c
+@@ -441,6 +441,9 @@ bool ptep_test_and_clear_young(struct vm_area_struct *vma,
+ 		ret = test_and_clear_bit(_PAGE_BIT_ACCESSED,
+ 					 (unsigned long *) &ptep->pte);
+ 
++	if (ret)
++		flush_tlb_page(vma, addr);
++
+ 	return ret;
+ }
+ 
+@@ -454,6 +457,9 @@ bool pmdp_test_and_clear_young(struct vm_area_struct *vma,
+ 		ret = test_and_clear_bit(_PAGE_BIT_ACCESSED,
+ 					 (unsigned long *)pmdp);
+ 
++	if (ret)
++		flush_tlb_range(vma, addr & PMD_MASK, (addr & PMD_MASK) + PMD_SIZE);
++
+ 	return ret;
+ }
+ #endif
+-- 
+2.47.3
+
