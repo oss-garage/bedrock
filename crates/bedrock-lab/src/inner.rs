@@ -31,6 +31,7 @@ pub(crate) struct LabInner {
     pub(crate) graph: Mutex<LabGraph>,
     pub(crate) live_branches: Mutex<HashMap<BranchId, BranchMeta>>,
     pub(crate) sink: Arc<dyn EventSink>,
+    pub(crate) file_store_dir: Option<std::path::PathBuf>,
 }
 
 /// The logical checkpoint tree. Rewinds insert nodes here without changing the
@@ -43,7 +44,11 @@ pub(crate) struct LabGraph {
 }
 
 impl LabInner {
-    pub(crate) fn new(tsc_frequency: u64, sink: Arc<dyn EventSink>) -> Arc<Self> {
+    pub(crate) fn new(
+        tsc_frequency: u64,
+        sink: Arc<dyn EventSink>,
+        file_store_dir: Option<std::path::PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             tsc_frequency,
             next_checkpoint_id: AtomicU64::new(0),
@@ -52,6 +57,7 @@ impl LabInner {
             graph: Mutex::new(LabGraph::default()),
             live_branches: Mutex::new(HashMap::new()),
             sink,
+            file_store_dir,
         })
     }
 
