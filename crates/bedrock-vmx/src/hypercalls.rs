@@ -214,3 +214,28 @@ pub const HYPERCALL_GET_RANDOM: u64 = 11;
 /// If the host read succeeded, the guest sends the next chunk. This loop happens
 /// until the guest has no more chunks to send.
 pub const HYPERCALL_FILE_STORE: u64 = 12;
+
+/// Fetch the next fuzz input into the registered buffer.
+///
+/// Inputs: none in registers — the response is framed inside the shared buffer
+/// the guest registered (via `HYPERCALL_REGISTER_FEEDBACK_BUFFER`) under the id
+/// `fuzz-input`.
+///
+/// Outputs:
+/// - RAX: 0. The actual result is delivered by the host in the buffer (see below).
+///
+/// This mirrors `HYPERCALL_FILE_FETCH`: the hypervisor owns none of the
+/// framing. It sets RAX to 0, advances RIP and exits to userspace with
+/// `ExitReason::VmcallFuzzNextInput`. The host driver writes the next testcase
+/// into the (host-mapped) buffer before the next RUN:
+/// - bytes `[0..8)`:  `i64` little-endian result — `>= 0` is the number of
+///   input bytes that follow, `-1` means "no more inputs, shut down".
+/// - bytes `[8..16)`: reserved (zero).
+/// - bytes `[16..16+result)`: the input bytes.
+///
+/// The intended use is snapshot fuzzing: the guest harness registers the
+/// buffer, does its expensive one-time setup, then issues this hypercall. The
+/// host takes a `Checkpoint` at that exit and forks one branch per testcase,
+/// writing a different input into each fork's copy-on-write buffer. Every fork
+/// resumes from inside this hypercall, so the setup cost is paid exactly once.
+pub const HYPERCALL_FUZZ_NEXT_INPUT: u64 = 13;
