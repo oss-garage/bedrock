@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bedrock_vm::events::EventKind;
 use bedrock_vm::file_store::FileWriter;
+use bedrock_vm::fuzz_input::{FuzzOutcome, InputServer};
 use bedrock_vm::{
     EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger, Vm, VmError,
 };
@@ -161,6 +162,9 @@ pub struct Branch {
     event_config: EventConfig,
     /// Extracts files from the guest to the host.
     file_writer: FileWriter,
+    /// Serves fuzzer testcases into the guest's registered `fuzz-input`
+    /// buffer.
+    input_server: InputServer,
 }
 
 impl Branch {
@@ -200,6 +204,7 @@ impl Branch {
             last_stop_at: None,
             event_config: EventConfig::default(),
             file_writer: FileWriter::new(),
+            input_server: InputServer::new(),
         };
         lab.sink.on_event(Event::BranchCreated {
             branch: id,
@@ -450,6 +455,25 @@ impl Branch {
             .collect())
     }
 
+    /// Write one fuzzer testcase into the guest's registered `fuzz-input`
+    /// buffer.
+    pub fn serve_fuzz_input(&mut self, input: &[u8]) -> Result<()> {
+        let vm = self.vm.as_mut().expect("Branch.vm taken");
+        self.input_server.serve(vm, input).map_err(LabError::from)
+    }
+
+    /// Read back what the guest reported about the testcase it just finished.
+    pub fn fuzz_outcome(&mut self) -> Result<FuzzOutcome> {
+        let vm = self.vm.as_mut().expect("Branch.vm taken");
+        self.input_server.outcome(vm).map_err(LabError::from)
+    }
+
+    /// The largest testcase the guest's input buffer can hold in bytes.
+    pub fn fuzz_input_capacity(&mut self) -> Result<usize> {
+        let vm = self.vm.as_mut().expect("Branch.vm taken");
+        self.input_server.capacity(vm).map_err(LabError::from)
+    }
+
     /// Every distinct registered feedback-buffer id, in order of first slot.
     /// Issues one ioctl per slot.
     pub fn feedback_buffer_ids(&self) -> Result<Vec<Vec<u8>>> {
@@ -532,6 +556,13 @@ impl Branch {
                         return Ok((at, RunOutcome::Yielded { kind: exit.kind() }))
                     }
                 },
+                ExitKind::FileStore => {
+                    let vm = self.vm.as_mut().expect("Branch.vm taken");
+                    self.file_writer
+                        .write(vm)
+                        .map_err(|source| LabError::FileStoreFailed { at, source })?;
+                    continue;
+                }
                 ExitKind::Continue | ExitKind::EventBufferFull => continue,
                 kind => return Ok((at, RunOutcome::Yielded { kind })),
             }

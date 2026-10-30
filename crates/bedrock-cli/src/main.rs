@@ -15,6 +15,7 @@ use log::{debug, info, trace, warn};
 use bedrock_vm::events::EventKind;
 use bedrock_vm::file_store::FileWriter;
 use bedrock_vm::file_xfer::FileServer;
+use bedrock_vm::fuzz_input::InputServer;
 use bedrock_vm::io_channel;
 use bedrock_vm::{
     load_kernel, ConsoleLine, EventCategories, EventConfig, EventStream, ExitKind, ExitStatsReport,
@@ -406,6 +407,9 @@ fn run() -> io::Result<()> {
     // Receives files the guest stores to the host.
     let mut file_writer = FileWriter::new();
 
+    // Only used to answer HYPERCALL_FUZZ_NEXT_INPUT with eof.
+    let mut input_server = InputServer::new();
+
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
     let timeout_duration = args
@@ -515,6 +519,11 @@ fn run() -> io::Result<()> {
                             Err(e) => warn!("Failed to write guest file chunk on host: {}", e),
                         }
                         continue;
+                    }
+                    ExitKind::FuzzNextInput => {
+                        // bedrock-cli is not a fuzzer.
+                        log::error!("bedrock-cli encountered ExitKind::FuzzNextInput!");
+                        break;
                     }
                     ExitKind::Continue | ExitKind::EventBufferFull => continue,
                     ExitKind::Rdrand | ExitKind::Rdseed | ExitKind::VmcallGetRandom => {

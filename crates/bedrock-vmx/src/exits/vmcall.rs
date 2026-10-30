@@ -348,6 +348,19 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFileStore)
         }
+        HYPERCALL_FUZZ_NEXT_INPUT => {
+            // The guest harness wants the next fuzzer testcase. The host
+            // driver writes the input into the (host-mapped) `fuzz-input`
+            // feedback buffer before the next RUN. We only set RAX to 0,
+            // advance RIP and exit to userspace. The result (input length,
+            // or -1 for "no more inputs") is delivered in the buffer's
+            // response header.
+            ctx.state_mut().gprs.rax = 0;
+            if let Err(e) = advance_rip(ctx) {
+                return ExitHandlerResult::Error(e);
+            }
+            ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFuzzNextInput)
+        }
         HYPERCALL_IO_REGISTER_PAGE => {
             // RBX = 4KB-aligned GVA of the shared page. The GPA is recorded
             // since it is stable across CR3 changes (the module pins the page
