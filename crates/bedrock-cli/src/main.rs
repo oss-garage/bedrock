@@ -516,6 +516,11 @@ fn run() -> io::Result<()> {
                         }
                         continue;
                     }
+                    ExitKind::FuzzNextInput => {
+                        // bedrock-cli is not a fuzzer.
+                        log::error!("bedrock-cli encountered ExitKind::FuzzNextInput!");
+                        break;
+                    }
                     ExitKind::Continue | ExitKind::EventBufferFull => continue,
                     ExitKind::Rdrand | ExitKind::Rdseed | ExitKind::VmcallGetRandom => {
                         warn!(

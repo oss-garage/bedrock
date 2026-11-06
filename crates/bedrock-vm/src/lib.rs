@@ -107,6 +107,7 @@ mod error;
 pub mod events;
 pub mod file_store;
 pub mod file_xfer;
+pub mod fuzz_input;
 pub mod io_channel;
 mod rdrand;
 mod registers;
