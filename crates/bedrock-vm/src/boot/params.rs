@@ -7,6 +7,7 @@ use super::constants::boot_params_offsets as offsets;
 use super::constants::boot_protocol::{self, loadflags};
 use super::constants::e820;
 use super::constants::memory::{BOOT_PARAMS_ADDR, CMDLINE_ADDR, PAGE_SIZE};
+use bedrock_vmx::exits::{APIC_BASE, APIC_SIZE, IOAPIC_BASE};
 
 /// E820 memory map entry (matches Linux struct e820_entry).
 #[repr(C, packed)]
@@ -65,7 +66,11 @@ pub fn setup_boot_params(
 }
 
 fn setup_e820_table(boot_params: &mut [u8], memory_size: usize) {
-    let entries = [
+    let mmio_start = IOAPIC_BASE;
+    let mmio_end = APIC_BASE + APIC_SIZE;
+    let mem_end = memory_size as u64;
+
+    let mut entries = vec![
         // Entry 0: Low memory (0 - 0x9FC00) - conventional memory
         E820Entry {
             addr: 0,
@@ -84,13 +89,27 @@ fn setup_e820_table(boot_params: &mut [u8], memory_size: usize) {
             size: 0x60000,
             type_: e820::RESERVED,
         },
-        // Entry 3: Main RAM (1MB - memory_size)
+        // Entry 3: Main RAM (1MB - min(memory_size, mmio_start))
         E820Entry {
             addr: 0x100000,
-            size: (memory_size - 0x100000) as u64,
+            size: mem_end.min(mmio_start) - 0x100000,
             type_: e820::RAM,
         },
     ];
+    if mem_end > mmio_start {
+        entries.push(E820Entry {
+            addr: mmio_start,
+            size: mem_end.min(mmio_end) - mmio_start,
+            type_: e820::RESERVED,
+        });
+    }
+    if mem_end > mmio_end {
+        entries.push(E820Entry {
+            addr: mmio_end,
+            size: mem_end - mmio_end,
+            type_: e820::RAM,
+        });
+    }
 
     write_u8(boot_params, offsets::E820_ENTRIES, entries.len() as u8);
 
