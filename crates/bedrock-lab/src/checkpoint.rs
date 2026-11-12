@@ -38,6 +38,7 @@ pub struct LabOpts {
     /// during boot (e.g. the podman initrd's `compose.yaml` / `images.tar`).
     /// Only served before the ready hypercall.
     pub files: Vec<(String, String)>,
+    pub file_store_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for LabOpts {
@@ -47,6 +48,7 @@ impl Default for LabOpts {
             sink: Arc::new(Discard),
             rng: RngMode::Inherit,
             files: Vec::new(),
+            file_store_dir: None,
         }
     }
 }
@@ -169,6 +171,7 @@ impl Checkpoint {
             sink,
             rng,
             files,
+            file_store_dir,
         } = opts;
 
         let (rdrand_config, input_source) = match rng {
@@ -185,6 +188,7 @@ impl Checkpoint {
                 sink,
                 rng: RngMode::Inherit,
                 files,
+                file_store_dir,
             },
             input_source,
         ))
@@ -202,9 +206,10 @@ impl Checkpoint {
             sink,
             rng: _,
             files: _,
+            file_store_dir,
         } = opts;
 
-        let lab = LabInner::new(tsc_frequency, sink);
+        let lab = LabInner::new(tsc_frequency, sink, file_store_dir);
         let id = CheckpointId(lab.next_checkpoint_id());
         let inner = Arc::new(CheckpointInner {
             id,
