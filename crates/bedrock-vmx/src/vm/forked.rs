@@ -484,6 +484,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         true
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn cow_feedback_buffer_for_mapping<A: CowAllocator<Self::CowPage>>(
         &mut self,
         index: usize,
