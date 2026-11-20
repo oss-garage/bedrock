@@ -53,6 +53,7 @@ mod time;
 mod tree;
 
 pub use bash::{BashOutput, BashTarget};
+pub use bedrock_vm::fuzz_input::FuzzOutcome;
 pub use bedrock_vm::{EventCategories, EventRecord};
 pub use branch::{Branch, BranchId, EventConfig, ExitCapture, RunOutcome};
 pub use checkpoint::{Checkpoint, CheckpointId, LabOpts};

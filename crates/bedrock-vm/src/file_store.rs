@@ -6,6 +6,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use crate::Vm;
 
@@ -24,6 +25,7 @@ pub const FILE_STORE_IO_ERROR: i64 = -1;
 pub struct FileWriter {
     handles: HashMap<String, File>,
     slot: Option<usize>,
+    base_dir: Option<PathBuf>,
 }
 
 impl Default for FileWriter {
@@ -37,7 +39,14 @@ impl FileWriter {
         Self {
             handles: HashMap::new(),
             slot: None,
+            base_dir: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.base_dir = Some(dir.into());
+        self
     }
 
     /// Returns the bytes accepted, or 0 if the file name is disallowed.
@@ -78,14 +87,22 @@ impl FileWriter {
                 .into_owned();
 
         // Truncate on the first chunk only.
+        let base_dir = self.base_dir.clone();
         let file = match self.handles.entry(name) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
+                let path = match &base_dir {
+                    Some(dir) => {
+                        std::fs::create_dir_all(dir)?;
+                        dir.join(e.key())
+                    }
+                    None => PathBuf::from(e.key()),
+                };
                 let handle = OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
-                    .open(e.key())?;
+                    .open(path)?;
                 e.insert(handle)
             }
         };
