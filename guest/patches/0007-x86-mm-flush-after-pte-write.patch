@@ -5,13 +5,12 @@ Subject: [PATCH 5/5] x86/mm: flush TLB on permission upgrade in
 When attempting to write to a CoW'd page, wp_page_reuse adds the
 write permission via ptep_set_access_flags. Intel SDM Volume 3A
 subsection 5.10.4.1 states that #PF does invalidate the TLB entry.
-Assuming the SDM and Ice Lake are both correct, something else
-non-deterministically re-populates the TLB with this read-only
-page before the call to set_pte makes the pte writable. This
-causes a spurious fault causing more instructions to be executed
-which eventually affects the timestamp and eventually cascades
-to other fields. Fix this by flushing the TLB after updating the
-permission.
+Speculative execution may re-populate the TLB with a read-only
+entry before the write permission is added in spite of Intel's
+guarantees. This causes a spurious fault causing more instructions
+to be executed which eventually affects the timestamp and eventually
+cascades to other fields. Fix this by flushing the TLB after
+updating the permission.
 
 Signed-off-by: Bedrock <bedrock@example.com>
 ---
