@@ -92,6 +92,14 @@ typedef unsigned long long vmcall_u64;
  */
 #define HYPERCALL_FILE_STORE 12ULL
 
+/*
+ * Fetch the next fuzzer testcase into the registered fuzz-input buffer. No
+ * register arguments — the response is framed inside the buffer the guest
+ * registered under VMCALL_FUZZ_INPUT_BUFFER_ID. Returns 0 in RAX; the real
+ * result is the response the host writes into the buffer.
+ */
+#define HYPERCALL_FUZZ_NEXT_INPUT 13ULL
+
 /* ------------------------------------------------------------------------- */
 /* ABI constants.                                                            */
 /* ------------------------------------------------------------------------- */
@@ -177,6 +185,38 @@ typedef unsigned long long vmcall_u64;
 #define VMCALL_FILE_STORE_BUFFER_ID "bedrock-file-store"
 #define VMCALL_FILE_STORE_HEADER_LEN 16U
 #define VMCALL_FILE_STORE_IO_ERROR (-1LL)
+
+/*
+ * Fuzz-input framing (HYPERCALL_FUZZ_NEXT_INPUT). The guest registers one
+ * feedback buffer under the id VMCALL_FUZZ_INPUT_BUFFER_ID and uses it as the
+ * host->guest transport for testcases. Mirrors
+ * crates/bedrock-vm/src/fuzz_input.rs — keep in sync.
+ *
+ * The header carries both directions, because both happen at the same
+ * hypercall: the guest reports on the testcase it just finished in the same
+ * call that asks for the next one.
+ *
+ *   [0..8)   u64 result   (host writes): input byte count
+ *   [8..16)  u64 status   (guest writes): outcome of the PREVIOUS testcase,
+ *                         one of VMCALL_FUZZ_STATUS_*
+ *   [16..24) u64 aux      (guest writes): message length when status is FAIL
+ *   [24..32) reserved     (zero)
+ *   [32..32+result)       the input bytes (host writes), or the guest's failure
+ *                         message when status is FAIL
+ *
+ * The buffer is sized by the guest at registration. A buffer larger than
+ * VMCALL_FEEDBACK_BUFFER_MAX_SIZE must be a multiple of it and is registered
+ * as consecutive slots under the same id (see
+ * vmcall_register_fuzz_input_buffer); the host treats them as one buffer.
+ * Usable input capacity is the total size less VMCALL_FUZZ_INPUT_HEADER_LEN.
+ */
+#define VMCALL_FUZZ_INPUT_BUFFER_ID "fuzz-input"
+#define VMCALL_FUZZ_INPUT_HEADER_LEN 32U
+
+/* Values for the guest-written status word at [8..16). */
+#define VMCALL_FUZZ_STATUS_OK 0ULL
+#define VMCALL_FUZZ_STATUS_SKIP 1ULL
+#define VMCALL_FUZZ_STATUS_FAIL 2ULL
 
 /* ------------------------------------------------------------------------- */
 /* Generic VMCALL primitives — hypercall number plus up to five arguments.   */
@@ -347,6 +387,47 @@ static inline vmcall_u64 vmcall_file_fetch(void)
 static inline vmcall_u64 vmcall_file_store(void)
 {
         return vmcall0(HYPERCALL_FILE_STORE);
+}
+
+/*
+ * Block until the host supplies the next fuzzer testcase in the registered
+ * fuzz-input buffer. Always returns 0 — read the result word out of the buffer
+ * header to get the input length.
+ *
+ * The host checkpoints the VM at this exit, so on a forked VM this call is
+ * where execution resumes, with a testcase already written into the buffer.
+ */
+static inline vmcall_u64 vmcall_fuzz_next_input(void)
+{
+	return vmcall0(HYPERCALL_FUZZ_NEXT_INPUT);
+}
+
+/*
+ * Register `buf` as the fuzz-input buffer, one VMCALL_FEEDBACK_BUFFER_MAX_SIZE
+ * slot at a time, in order. `size` must be a non-zero multiple of
+ * VMCALL_FEEDBACK_BUFFER_MAX_SIZE. Same residency rules as
+ * vmcall_register_feedback_buffer. Returns VMCALL_OK, or the first failing
+ * VMCALL_FB_ERR_* code.
+ */
+static inline vmcall_u64 vmcall_register_fuzz_input_buffer(void *buf,
+							   vmcall_u64 size)
+{
+        /* On the stack, not .rodata: the hypervisor can't fault in the id's page. */
+        char id[] = VMCALL_FUZZ_INPUT_BUFFER_ID;
+	vmcall_u64 off;
+
+	if (size == 0 || size % VMCALL_FEEDBACK_BUFFER_MAX_SIZE)
+		return VMCALL_FB_ERR_BAD_SIZE;
+
+	for (off = 0; off < size; off += VMCALL_FEEDBACK_BUFFER_MAX_SIZE) {
+		vmcall_u64 ret = vmcall_register_feedback_buffer(
+			(char *)buf + off, VMCALL_FEEDBACK_BUFFER_MAX_SIZE, id,
+			sizeof(id) - 1);
+
+		if (ret >= VMCALL_FB_ERR_NO_SLOTS)
+			return ret;
+	}
+	return VMCALL_OK;
 }
 
 #ifdef __cplusplus
